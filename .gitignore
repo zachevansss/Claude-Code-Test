@@ -11,6 +11,9 @@ desktop.ini
 *.swo
 *~
 
+# Claude Code local state (per-user)
+.claude/
+
 # Env / secrets
 .env
 .env.*

@@ -47,14 +47,25 @@ python main.py
 
 API on `http://localhost:8000`. Interactive docs at `/docs`.
 
+## Smoke-test the tracker (no DB or API server needed)
+
+```bash
+.venv/Scripts/python scripts/smoke_tracker.py
+# or against a different wallet:
+.venv/Scripts/python scripts/smoke_tracker.py --wallet 0xabc...
+```
+
+Polls Polymarket's data API for the configured wallet, parses the response through `WalletTracker`, and prints up to 10 emitted signals. Verified on `0x2005d16a84ceefa912d4e380cd32e7ff827875ea` (48 signals returned).
+
 ## Modes
 
 - `MODE=paper` — `SimulationEngine` writes trades + positions with `mode='paper'`. No network calls to exchanges.
-- `MODE=live` — `ExecutionEngine` is currently `NotImplementedError`. Live trading requires resolving the **wallet/custody model** (non-custodial WalletConnect signing vs. managed wallet) before this can be wired up.
+- `MODE=live` — `ExecutionEngine` is currently `NotImplementedError`. Will use a **managed-wallet (custodial)** model: the platform generates and encrypts a per-user EOA, signs Polymarket CLOB orders on the user's behalf for 24/7 autonomous trading. SaaS deployment of this model triggers significant regulatory + security obligations — see CLAUDE.md.
 
 ## Status
 
-- Phase 1 in progress: backend skeleton + paper-mode wiring complete.
-- Next up: real Polymarket data-API polling in `tracker/poller.py`, end-to-end paper trade demo, then frontend integration with Base44 export.
+- Phase 1 (backend skeleton) ✅
+- Phase 2 (single-user paper bot end-to-end) ✅ — tracker verified live against Polymarket data API
+- Next: managed-wallet executor (key generation + encryption + Polymarket CLOB signing), then frontend (Base44).
 
 See `CLAUDE.md` for module conventions and the per-edit commit workflow used in this repo.

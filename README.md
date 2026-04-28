@@ -68,7 +68,7 @@ Polls Polymarket's data API for the configured wallet, parses the response throu
 .venv/Scripts/python -m src.wallet.crypto generate     # outputs e.g. abc123...=
 # paste into .env as MASTER_ENCRYPTION_KEY=abc123...=
 ```
-Then sign up → `GET /wallet` shows your managed address → deposit USDC + a bit of MATIC → set `MODE=live` and `LIVE_TRADING_ENABLED=True` → set the user's mode to live via `POST /settings/mode {"mode": "live"}` → start the bot. See CLAUDE.md "Going-live checklist" for the full sequence including the one-time on-chain approval step.
+Then: sign up → `GET /wallet` shows your managed address → deposit USDC + ~0.5 MATIC for gas → `POST /wallet/setup` (one-time on-chain approvals, idempotent) → set `MODE=live` and `LIVE_TRADING_ENABLED=True` in `.env` → `POST /settings/mode {"mode":"live"}` → `POST /bot/start`. Full sequence with verification steps in CLAUDE.md "Going-live checklist".
 
 ## Status
 

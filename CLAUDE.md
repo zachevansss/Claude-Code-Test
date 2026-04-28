@@ -72,14 +72,16 @@ python main.py             # uvicorn on :8000, /docs for interactive
 - `models/` — `User`, `UserSettings`, `UserWallet` (source wallets to copy), `ManagedWallet` (the user's platform-managed EOA, encrypted PK), `BotInstance`, `Trade`, `Position`. Every business row carries `user_id`. `Trade` and `Position` carry `mode` ("paper"/"live") so paper and live histories live in one table cleanly separated. `Trade.asset_id` stores the Polymarket ERC-1155 token id; `Trade.external_tx` is the source-wallet tx hash used for cross-tick dedupe.
 - `wallet/crypto.py` — Fernet encrypt/decrypt for private keys. Refuses to operate without a valid `MASTER_ENCRYPTION_KEY`. CLI: `python -m src.wallet.crypto generate` mints a fresh key.
 - `wallet/manager.py` — `WalletManager` (static methods): `create_for_user`, `get_or_create`, `get_signer`, `get_private_key_hex`. Generation uses `eth_account.Account.create()` (CSPRNG).
+- `wallet/balances.py` — read-only on-chain lookups (`get_balances`, `get_usdc_balance`). Returns `None` on RPC failure rather than raising; callers decide how to react.
+- `wallet/approvals.py` — `setup_wallet(signer)` runs the one-time on-chain approvals (USDC.approve + CTF.setApprovalForAll for the CTF Exchange). Idempotent — checks current allowance/approval first and skips if already set. Negative-risk markets need additional approvals not yet wired (see file).
 - `auth/{security,jwt,deps}.py` — bcrypt hashing, JWT encode/decode, `get_current_user` dep
 - `api/app.py` — app factory; lifespan hook creates tables and calls `bot_manager.restart_all()` on boot
-- `api/routers/` — `auth` (signup auto-provisions a ManagedWallet), `bot`, `wallets` (source wallets to mirror), `wallet` (managed wallet read: address + on-chain USDC/MATIC), `settings`, `data` (trades + stats).
+- `api/routers/` — `auth` (signup auto-provisions a ManagedWallet), `bot`, `wallets` (source wallets to mirror), `wallet` (`GET` returns address + on-chain USDC/MATIC; `POST /setup` runs Polymarket approvals), `settings`, `data` (trades + stats).
 - `tracker/poller.py` — `WalletTracker.poll() -> list[TradeSignal]`. Hits Polymarket data API (`/activity?user=<addr>`) in parallel per wallet via `httpx.AsyncClient`. Per-wallet errors are isolated. First poll seeds `_seen` and emits nothing (avoids historical flood); the BotManager pre-seeds `_seen` from `Trade.external_tx` so restarts don't re-emit. Tracker instances are owned by BotManager and persist across ticks. Emits `asset_id` (CLOB token id) on every signal.
 - `risk/manager.py` — `RiskManager.size(signal) -> SizedOrder`. Applies sizing strategy then per-trade / per-market / daily caps. Raises `RiskRejection` on reject.
 - `simulation/engine.py` — `SimulationEngine.execute(order)` updates trades + positions with `mode='paper'`. No network.
 - `executor/engine.py` — `ExecutionEngine.execute(order)` signs + posts a Polymarket CLOB GTC limit order via `py-clob-client`. Three independent safety gates (kill switch, managed wallet present, asset_id+external_tx present); slippage tolerance widens limit price; retries with backoff. Persists `Trade(mode='live')` keyed by source-wallet tx for dedupe; CLOB order id stored in `status`. Refusals raise `ExecutionRefused`; the bot loop catches and logs without crashing.
-- `bot_manager/manager.py` — singleton `bot_manager`. `start/stop/restart_all/stop_all`. Owns one persistent `WalletTracker` per user. Each `_tick` polls, dedupes signals against `Trade.external_tx` in DB (final safety net), runs risk, dispatches to engine. Calls `engine.set_slippage(...)` on the live engine. Daily loss is computed from today's `Position.realized_pnl_usd` deltas.
+- `bot_manager/manager.py` — singleton `bot_manager`. `start/stop/restart_all/stop_all`. Owns one persistent `WalletTracker` per user. Each `_tick` polls, dedupes signals against `Trade.external_tx` in DB (final safety net), runs risk, dispatches to engine. For paper mode uses `paper_balance_usd`; for live mode looks up on-chain USDC and **skips the tick** (rather than trade with stale data) if the RPC lookup fails. Calls `engine.set_slippage(...)` on the live engine. Daily loss is computed from today's `Position.realized_pnl_usd` deltas.
 - `analytics/engine.py` — `AnalyticsEngine.compute(user_id) -> StatsOut`
 
 ### Architecture rules
@@ -107,17 +109,16 @@ Per-user EOA, key generated via `eth_account.Account.create()` on signup, encryp
 
 ### Going-live checklist (do BEFORE flipping LIVE_TRADING_ENABLED=True)
 1. Generate `MASTER_ENCRYPTION_KEY` and back it up to a password manager — losing it means losing all wallets.
-2. Sign up, hit `GET /wallet`, see your managed address.
-3. Send a small amount of USDC (e.g., $5) and ~0.5 MATIC to that address on Polygon.
-4. **One-time on-chain setup not yet automated:** the EOA must `approve()` Polymarket's Exchange contract to spend USDC and CTF tokens. Until we add a `POST /wallet/setup` endpoint, do this manually or via the Polymarket UI.
-5. Use a paid Polygon RPC (`POLYGON_RPC_URL` — Alchemy / Infura / QuickNode), not the public default which 401s.
-6. Set `MODE=live` and `LIVE_TRADING_ENABLED=True`. Set the user's mode to `live` via `POST /settings/mode`.
+2. Configure a paid `POLYGON_RPC_URL` (Alchemy / Infura / QuickNode). The public default rate-limits with 401s.
+3. Sign up. `GET /wallet` returns your managed address.
+4. Send a small amount of USDC (e.g., $5) and ~0.5 MATIC for gas to that address on Polygon.
+5. `POST /wallet/setup` runs the on-chain USDC + CTF approvals (idempotent). Returns the tx hashes — verify on Polygonscan.
+6. Set `MODE=live` and `LIVE_TRADING_ENABLED=True` in `.env`. Set the user's mode via `POST /settings/mode {"mode":"live"}`.
 7. Start the bot. Monitor `[EXECUTION]` logs and `BotInstance.last_error`.
 
 ### Known gaps still to close
-- **Live-mode balance** — risk sizing still uses `paper_balance_usd`. For live mode, sub in the actual on-chain USDC balance from `/wallet`.
-- **One-time wallet setup** — Polymarket Exchange approvals + CLOB API credential creation should be wrapped in `POST /wallet/setup`. Currently you'd do it manually via the Polymarket UI or a one-off script.
-- **Withdrawals** — `POST /wallet/withdraw` not yet implemented. For SaaS, this needs strong auth (2FA / email confirm / cooldown).
-- **Order status reconciliation** — we persist the trade at submission with the limit price. To reflect actual fill price + partial fills, add a poller that hits the CLOB order status endpoint and updates rows.
+- **Withdrawals** — `POST /wallet/withdraw` not yet implemented. For SaaS, needs strong auth (2FA / email confirm / cooldown).
+- **Order status reconciliation** — trades are persisted at submission with the limit price. To reflect actual fill price + partial fills, add a poller that hits the CLOB order status endpoint and updates rows.
+- **Negative-risk market approvals** — `wallet/approvals.py` covers the CTF Exchange but not the Neg Risk Exchange/Adapter. Add when you start trading negative-risk markets.
 - **Async-friendliness** — `py-clob-client` is sync; `.execute()` briefly blocks the event loop. Wrap with `asyncio.to_thread()` past ~50 concurrent users.
 - **Alembic migrations** — schema is `Base.metadata.create_all` only; add migrations before swapping to PostgreSQL.

@@ -15,6 +15,7 @@ class Trade(Base):
     source_wallet: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
     market_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    asset_id: Mapped[str | None] = mapped_column(String(128), nullable=True)  # ERC-1155 token id
     outcome: Mapped[str] = mapped_column(String(64), nullable=False)
     side: Mapped[str] = mapped_column(String(8), nullable=False)  # "buy" | "sell"
     price: Mapped[float] = mapped_column(Float, nullable=False)

@@ -10,12 +10,13 @@ log = get_logger("RISK")
 class TradeSignal:
     """Output of the wallet tracker; input to risk."""
     source_wallet: str
-    market_id: str
-    outcome: str
+    market_id: str          # Polymarket conditionId
+    outcome: str            # human-readable outcome label
     side: str               # "buy" | "sell"
     price: float
     size: float             # source-wallet size (units, not USD)
-    external_tx: str | None = None  # source-wallet tx hash; used for dedupe
+    external_tx: str | None = None   # source-wallet tx hash; used for dedupe
+    asset_id: str | None = None      # ERC-1155 token id; CLOB orders need this
 
 
 @dataclass
@@ -27,7 +28,8 @@ class SizedOrder:
     price: float
     size: float
     notional_usd: float
-    external_tx: str | None = None  # propagated from the source signal
+    external_tx: str | None = None
+    asset_id: str | None = None
 
 
 class RiskRejection(Exception):
@@ -90,4 +92,5 @@ class RiskManager:
             size=size,
             notional_usd=notional,
             external_tx=signal.external_tx,
+            asset_id=signal.asset_id,
         )

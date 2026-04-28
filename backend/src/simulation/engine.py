@@ -21,6 +21,7 @@ class SimulationEngine:
             user_id=self.user_id,
             source_wallet=source_wallet,
             market_id=order.market_id,
+            asset_id=order.asset_id,
             outcome=order.outcome,
             side=order.side,
             price=order.price,

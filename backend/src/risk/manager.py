@@ -12,9 +12,10 @@ class TradeSignal:
     source_wallet: str
     market_id: str
     outcome: str
-    side: str          # "buy" | "sell"
+    side: str               # "buy" | "sell"
     price: float
-    size: float        # source-wallet size (units, not USD)
+    size: float             # source-wallet size (units, not USD)
+    external_tx: str | None = None  # source-wallet tx hash; used for dedupe
 
 
 @dataclass
@@ -26,6 +27,7 @@ class SizedOrder:
     price: float
     size: float
     notional_usd: float
+    external_tx: str | None = None  # propagated from the source signal
 
 
 class RiskRejection(Exception):
@@ -87,4 +89,5 @@ class RiskManager:
             price=signal.price,
             size=size,
             notional_usd=notional,
+            external_tx=signal.external_tx,
         )

@@ -28,6 +28,7 @@ class SimulationEngine:
             notional_usd=order.notional_usd,
             mode="paper",
             status="filled",
+            external_tx=order.external_tx,
             created_at=datetime.utcnow(),
         )
         self.db.add(trade)

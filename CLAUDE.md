@@ -45,6 +45,57 @@ Don't promote these to `--global`.
 
 `origin` → `https://github.com/zachevansss/Claude-Code-Test` (private). Default branch is `main`. `gh` CLI is authenticated as `zachevansss` and can be used for repo-level operations (issues, PRs, releases).
 
-## Project state
+## Project: Polymarket Copy-Trade SaaS
 
-This is an experimentation workspace — at the time of writing there is no source code, build system, test framework, or linter configured. As real code lands, extend this file with the actual build / test / run commands and any non-obvious architecture. Until then, don't fabricate commands or workflows that aren't present in the repo.
+Multi-tenant copy-trading platform. Each user signs up, registers wallet addresses to mirror, configures sizing + risk, and runs an isolated bot in paper or live mode.
+
+### Stack
+- Backend: FastAPI · SQLAlchemy 2.0 · SQLite (PostgreSQL-ready) · JWT/bcrypt auth
+- Bot runtime: one `asyncio` task per user, owned by `BotManager`. State persisted to DB so a server restart resumes any bot whose row says `running`.
+- Frontend: Base44-generated React/Next.js (placeholder under `frontend/`)
+
+### Run dev backend
+```bash
+cd backend
+python -m venv .venv && source .venv/Scripts/activate
+pip install -r requirements.txt
+cp .env.example .env       # edit JWT_SECRET
+python main.py             # uvicorn on :8000, /docs for interactive
+```
+
+### Module map (`backend/src/`)
+- `config/settings.py` — Pydantic settings, reads `.env`
+- `utils/logging.py` — `get_logger("COMPONENT")` returns adapter that prefixes every record with `[COMPONENT]`. Use exactly: `TRACKER`, `RISK`, `SIMULATION`, `EXECUTION`, `DATABASE`, `API`, `BOT_MANAGER`, `AUTH`, `ANALYTICS`.
+- `database/{base,session}.py` — declarative `Base`, `engine`, `SessionLocal`, `get_db()` FastAPI dep
+- `models/` — `User`, `UserSettings`, `UserWallet`, `BotInstance`, `Trade`, `Position`. Every business row carries `user_id`. `Trade` and `Position` carry `mode` ("paper"/"live") so paper and live histories live in one table cleanly separated.
+- `auth/{security,jwt,deps}.py` — bcrypt hashing, JWT encode/decode, `get_current_user` dep
+- `api/app.py` — app factory; lifespan hook creates tables and calls `bot_manager.restart_all()` on boot
+- `api/routers/` — `auth`, `bot`, `wallets`, `settings`, `data` (trades + stats)
+- `tracker/poller.py` — `WalletTracker.poll() -> list[TradeSignal]`. Stub for now; Phase 2 hits Polymarket data API.
+- `risk/manager.py` — `RiskManager.size(signal) -> SizedOrder`. Applies sizing strategy then per-trade / per-market / daily caps. Raises `RiskRejection` on reject.
+- `simulation/engine.py` — `SimulationEngine.execute(order)` updates trades + positions with `mode='paper'`. No network.
+- `executor/engine.py` — `ExecutionEngine.execute(order)` raises `NotImplementedError`. Wiring it up depends on the wallet/custody decision (non-custodial signing vs. managed wallet).
+- `bot_manager/manager.py` — singleton `bot_manager`. `start/stop/restart_all/stop_all`. Each loop calls `_tick` every `BOT_POLL_INTERVAL_SECONDS`.
+- `analytics/engine.py` — `AnalyticsEngine.compute(user_id) -> StatsOut`
+
+### Architecture rules
+- **Modular** — each module has one job; cross-module deps via narrow interfaces (`TradeSignal`, `SizedOrder`).
+- **Multi-user from day one** — every query filters by `user_id`; bot loops are per-user; never store global state that bleeds between users.
+- **Paper and live use the same shape** — `SimulationEngine` and `ExecutionEngine` expose the same `.execute(order, source_wallet)`; the bot manager picks one based on `UserSettings.mode`. Don't fork code paths beyond the engine boundary.
+- **Live execution is gated** — `ExecutionEngine` raises `NotImplementedError`. Don't replace it with placeholder logic; wait for the wallet/custody decision.
+- **Log every meaningful action** with the appropriate `[COMPONENT]` tag.
+- **Don't break existing functionality** — run the API and exercise the affected endpoint(s) before declaring an edit done.
+- **Don't hardcode** — anything tunable goes in `Settings` (env) or `UserSettings` (per-user DB row).
+
+### Phases (build order — don't skip)
+1. Backend structure ✅
+2. Single-user bot engine end-to-end (paper) — current
+3. Multi-user architecture (already structurally in place; needs load testing)
+4. Database models ✅ (refine as needed)
+5. API layer ✅
+6. Bot manager ✅ (skeleton; tracker is still a stub)
+7. Frontend UI (Base44)
+8. Deployment (VPS + Supervisor/PM2 + auto-restart)
+
+### Open architectural decision
+**Wallet/custody model for live execution** — see executor stub. Three options: non-custodial WalletConnect signing, custodial managed wallet, or imported private keys (do not implement option 3).

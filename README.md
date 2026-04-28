@@ -59,13 +59,22 @@ Polls Polymarket's data API for the configured wallet, parses the response throu
 
 ## Modes
 
-- `MODE=paper` — `SimulationEngine` writes trades + positions with `mode='paper'`. No network calls to exchanges.
-- `MODE=live` — `ExecutionEngine` is currently `NotImplementedError`. Will use a **managed-wallet (custodial)** model: the platform generates and encrypts a per-user EOA, signs Polymarket CLOB orders on the user's behalf for 24/7 autonomous trading. SaaS deployment of this model triggers significant regulatory + security obligations — see CLAUDE.md.
+- **Paper** (`MODE=paper`) — `SimulationEngine` writes trades + positions with `mode='paper'`. No network calls. Default and safe.
+- **Live** (`MODE=live` AND `LIVE_TRADING_ENABLED=True`) — `ExecutionEngine` signs Polymarket CLOB orders via `py-clob-client` using a per-user managed EOA (private key encrypted at rest with the master Fernet key in `.env`). User deposits USDC + MATIC to their managed address; the bot trades from there. **Default kill switch is OFF — flip to `True` deliberately.**
+
+## Going live (personal use)
+
+```bash
+.venv/Scripts/python -m src.wallet.crypto generate     # outputs e.g. abc123...=
+# paste into .env as MASTER_ENCRYPTION_KEY=abc123...=
+```
+Then sign up → `GET /wallet` shows your managed address → deposit USDC + a bit of MATIC → set `MODE=live` and `LIVE_TRADING_ENABLED=True` → set the user's mode to live via `POST /settings/mode {"mode": "live"}` → start the bot. See CLAUDE.md "Going-live checklist" for the full sequence including the one-time on-chain approval step.
 
 ## Status
 
 - Phase 1 (backend skeleton) ✅
-- Phase 2 (single-user paper bot end-to-end) ✅ — tracker verified live against Polymarket data API
-- Next: managed-wallet executor (key generation + encryption + Polymarket CLOB signing), then frontend (Base44).
+- Phase 2 (paper-mode bot end-to-end, real Polymarket polling) ✅
+- Phase 3 (managed-wallet live executor) ✅ structurally — needs live-fire test with a funded wallet
+- Next: frontend (Base44), then deployment (Supervisor/PM2 on a VPS).
 
 See `CLAUDE.md` for module conventions and the per-edit commit workflow used in this repo.

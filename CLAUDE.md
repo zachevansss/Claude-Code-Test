@@ -71,11 +71,11 @@ python main.py             # uvicorn on :8000, /docs for interactive
 - `auth/{security,jwt,deps}.py` — bcrypt hashing, JWT encode/decode, `get_current_user` dep
 - `api/app.py` — app factory; lifespan hook creates tables and calls `bot_manager.restart_all()` on boot
 - `api/routers/` — `auth`, `bot`, `wallets`, `settings`, `data` (trades + stats)
-- `tracker/poller.py` — `WalletTracker.poll() -> list[TradeSignal]`. Stub for now; Phase 2 hits Polymarket data API.
+- `tracker/poller.py` — `WalletTracker.poll() -> list[TradeSignal]`. Hits Polymarket data API (`/activity?user=<addr>`) in parallel per wallet via `httpx.AsyncClient`. Per-wallet errors are isolated. First poll seeds `_seen` and emits nothing (avoids historical flood); the BotManager pre-seeds `_seen` from `Trade.external_tx` so restarts don't re-emit. Tracker instances are owned by BotManager and persist across ticks.
 - `risk/manager.py` — `RiskManager.size(signal) -> SizedOrder`. Applies sizing strategy then per-trade / per-market / daily caps. Raises `RiskRejection` on reject.
 - `simulation/engine.py` — `SimulationEngine.execute(order)` updates trades + positions with `mode='paper'`. No network.
 - `executor/engine.py` — `ExecutionEngine.execute(order)` raises `NotImplementedError`. Wiring it up depends on the wallet/custody decision (non-custodial signing vs. managed wallet).
-- `bot_manager/manager.py` — singleton `bot_manager`. `start/stop/restart_all/stop_all`. Each loop calls `_tick` every `BOT_POLL_INTERVAL_SECONDS`.
+- `bot_manager/manager.py` — singleton `bot_manager`. `start/stop/restart_all/stop_all`. Owns one persistent `WalletTracker` per user. Each `_tick` polls, dedupes signals against `Trade.external_tx` in DB (final safety net), runs risk, dispatches to engine. Daily loss is computed from today's `Position.realized_pnl_usd` deltas.
 - `analytics/engine.py` — `AnalyticsEngine.compute(user_id) -> StatsOut`
 
 ### Architecture rules
@@ -89,13 +89,20 @@ python main.py             # uvicorn on :8000, /docs for interactive
 
 ### Phases (build order — don't skip)
 1. Backend structure ✅
-2. Single-user bot engine end-to-end (paper) — current
-3. Multi-user architecture (already structurally in place; needs load testing)
+2. Single-user bot engine end-to-end (paper) ✅ — tracker live; needs live-fire verification against Polymarket API
+3. Multi-user architecture (structurally in place; needs load testing)
 4. Database models ✅ (refine as needed)
 5. API layer ✅
-6. Bot manager ✅ (skeleton; tracker is still a stub)
+6. Bot manager ✅ (real tracker wired)
 7. Frontend UI (Base44)
 8. Deployment (VPS + Supervisor/PM2 + auto-restart)
+
+### Known gaps to close before going live
+- `ExecutionEngine` — blocked on wallet/custody decision (see open question below).
+- Tracker activity-row schema — fields parsed defensively (`conditionId`/`marketId`, `outcome`/`outcomeName`, etc.); validate against a real Polymarket response and tighten once known.
+- Live-mode balance — `_tick` currently uses `paper_balance_usd` for risk sizing in both modes; live mode needs real on-chain USDC balance lookup.
+- Slippage handling, retry logic — to be added inside `ExecutionEngine` once it's real.
+- Alembic migrations — schema lives only in `Base.metadata.create_all`; add migrations before swapping to PostgreSQL.
 
 ### Open architectural decision
 **Wallet/custody model for live execution** — see executor stub. Three options: non-custodial WalletConnect signing, custodial managed wallet, or imported private keys (do not implement option 3).

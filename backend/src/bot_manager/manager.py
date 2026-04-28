@@ -1,15 +1,18 @@
 """BotManager — owns one asyncio loop per user with isolated state.
 
 Lifecycle:
-  start(user_id)  → spawn loop task
-  stop(user_id)   → cancel and await
-  restart_all()   → on server boot, restart any bot whose DB row says 'running'
-  stop_all()      → cancel every running task (used on shutdown)
+  start(user_id)   → spawn loop task + init persistent tracker
+  stop(user_id)    → cancel and await; drop tracker
+  restart_all()    → on server boot, restart any bot whose DB row says 'running'
+  stop_all()       → cancel every running task (used on shutdown)
 
-Each tick: load settings + wallets, poll tracker, run risk, dispatch to
-SimulationEngine (paper) or ExecutionEngine (live, currently unimplemented)."""
+Each tick: load settings + wallets, sync tracker addresses, poll for new signals,
+dedupe vs DB, run risk, dispatch to SimulationEngine (paper) or ExecutionEngine
+(live, currently NotImplementedError)."""
 import asyncio
 from datetime import datetime, timezone
+
+from sqlalchemy.orm import Session
 
 from src.config.settings import settings
 from src.database.session import SessionLocal
@@ -28,9 +31,20 @@ def _today_utc_start() -> datetime:
     return now.replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
 
 
+def _load_seen_tx(db: Session, user_id: int) -> set[str]:
+    """Pre-seed dedupe set from Trade.external_tx rows for this user."""
+    rows = (
+        db.query(Trade.external_tx)
+        .filter(Trade.user_id == user_id, Trade.external_tx.isnot(None))
+        .all()
+    )
+    return {r[0] for r in rows if r[0]}
+
+
 class BotManager:
     def __init__(self) -> None:
         self._tasks: dict[int, asyncio.Task] = {}
+        self._trackers: dict[int, WalletTracker] = {}
 
     async def start(self, user_id: int) -> None:
         existing = self._tasks.get(user_id)
@@ -43,6 +57,7 @@ class BotManager:
 
     async def stop(self, user_id: int) -> None:
         task = self._tasks.pop(user_id, None)
+        self._trackers.pop(user_id, None)
         if not task:
             return
         task.cancel()
@@ -82,6 +97,26 @@ class BotManager:
             log.info("bot loop cancelled for user=%s", user_id)
             raise
 
+    def _get_tracker(
+        self, db: Session, user_id: int, addresses: list[str]
+    ) -> WalletTracker:
+        """Persistent per-user tracker. On first creation, pre-seed `_seen` from
+        prior trades in DB so a restart doesn't re-emit historical signals."""
+        tracker = self._trackers.get(user_id)
+        if tracker is None:
+            seen = _load_seen_tx(db, user_id)
+            tracker = WalletTracker(
+                addresses, seen=seen, initialized=bool(seen)
+            )
+            self._trackers[user_id] = tracker
+            log.info(
+                "tracker created for user=%s with %d pre-seeded tx",
+                user_id, len(seen),
+            )
+        else:
+            tracker.update_addresses(addresses)
+        return tracker
+
     async def _tick(self, user_id: int) -> None:
         with SessionLocal() as db:
             user_settings = (
@@ -97,9 +132,27 @@ class BotManager:
             if not wallets:
                 return
 
-            tracker = WalletTracker([w.address for w in wallets])
+            tracker = self._get_tracker(db, user_id, [w.address for w in wallets])
             signals = await tracker.poll()
             if not signals:
+                return
+
+            # DB-level dedupe — final safety net against double execution.
+            tx_to_check = [s.external_tx for s in signals if s.external_tx]
+            already_seen: set[str] = set()
+            if tx_to_check:
+                rows = (
+                    db.query(Trade.external_tx)
+                    .filter(
+                        Trade.user_id == user_id,
+                        Trade.external_tx.in_(tx_to_check),
+                    )
+                    .all()
+                )
+                already_seen = {r[0] for r in rows}
+
+            fresh = [s for s in signals if s.external_tx not in already_seen]
+            if not fresh:
                 return
 
             balance = user_settings.paper_balance_usd  # TODO: real balance for live mode
@@ -114,20 +167,15 @@ class BotManager:
                 )
 
             since = _today_utc_start()
-            daily_loss = 0.0
-            todays_trades = (
-                db.query(Trade)
-                .filter(
-                    Trade.user_id == user_id,
-                    Trade.mode == user_settings.mode,
-                    Trade.created_at >= since,
+            todays_realized = sum(
+                p.realized_pnl_usd
+                for p in db.query(Position).filter(
+                    Position.user_id == user_id,
+                    Position.mode == user_settings.mode,
+                    Position.updated_at >= since,
                 )
-                .all()
             )
-            # Simple proxy until realized PnL streaming is in place.
-            for t in todays_trades:
-                if t.side == "sell":
-                    daily_loss += 0.0  # placeholder — refine in analytics pass
+            daily_loss = max(0.0, -todays_realized)
 
             risk = RiskManager(user_settings, balance, exposure, daily_loss)
             engine = (
@@ -136,7 +184,7 @@ class BotManager:
                 else ExecutionEngine(db, user_id)
             )
 
-            for sig in signals:
+            for sig in fresh:
                 try:
                     order = risk.size(sig)
                     engine.execute(order, source_wallet=sig.source_wallet)

@@ -2,15 +2,33 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Workflow: commit and push after every edit
+## Workflow: commit and push after every edit (mandatory)
 
-This repo runs on per-edit commits — a deliberate user choice for maximum revertibility. After every successful Edit/Write/NotebookEdit inside this working tree, stage the edited files, commit with a clean imperative message describing *what* changed, and push to `origin/main`.
+**As you work in this repo you MUST commit and push regularly so no work is ever lost.** This is a hard requirement, not a suggestion. Every successful file edit (Edit / Write / NotebookEdit) inside this working tree must be followed — in the same response, before yielding back to the user — by:
 
-- Don't batch unrelated edits into one commit. One logical change per commit, even if small.
-- Multiple files edited as part of a single logical change can share a commit.
-- Messages are imperative and specific: "Add user auth helper", "Fix typo in README intro" — never "auto commit" or "update file".
-- Skip the commit only if: the edit failed, the user says "don't commit yet" / "hold off", or the path is outside this working tree.
-- `.claude/` is gitignored (per-user Claude Code state); edits there are not commits.
+1. `git add <edited files>`
+2. `git commit -m "<clean imperative message>"`
+3. `git push` (to `origin/main`)
+
+The goal: at any point the user can stop the session, walk away, and find every change preserved on GitHub. If you have edited a file and have not yet pushed, your turn is not finished.
+
+**Commit message rules:**
+- Imperative mood, specific about *what* changed: "Add user auth helper", "Fix typo in README intro", "Refactor parser to handle empty input".
+- Never generic placeholders like "auto commit", "update file", "changes", "wip".
+- Describe the change, not the task ("Fix off-by-one in pagination" — not "Fix bug user reported").
+
+**Granularity:**
+- One logical change per commit. Don't batch unrelated edits.
+- Multiple files edited as part of a single logical change can share one commit.
+- Many small commits is the desired outcome — granular history is the whole point.
+
+**When NOT to commit:**
+- The edit failed (don't commit broken state — fix first, then commit).
+- The user explicitly said "don't commit yet" / "hold off pushing" / similar — honor that until they release the hold.
+- The path is outside this working tree (e.g., `~/.claude/...` user config).
+- The file is gitignored — `.claude/` is per-user Claude Code state and is not committed.
+
+**If a push fails** (network, auth, conflict): surface the error to the user immediately. Do not silently move on; an unpushed commit means work is at risk.
 
 ## Git identity is repo-local
 

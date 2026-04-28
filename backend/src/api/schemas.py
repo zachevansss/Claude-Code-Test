@@ -101,6 +101,19 @@ class ManagedWalletOut(BaseModel):
     balance_error: str | None = None  # populated if RPC lookup failed
 
 
+class ApprovalAction(BaseModel):
+    contract: str       # "USDC" | "CTF"
+    spender: str        # checksummed address
+    status: str         # "approved" | "already"
+    tx: str | None      # tx hash if a transaction was sent, None if skipped
+
+
+class WalletSetupOut(BaseModel):
+    address: str
+    matic_balance: float
+    actions: list[ApprovalAction]
+
+
 # --- Stats ---
 class WalletStat(BaseModel):
     wallet: str

@@ -1,12 +1,17 @@
-"""Managed-wallet endpoints. GET returns address + on-chain balances."""
-from fastapi import APIRouter, Depends
+"""Managed-wallet endpoints.
+
+GET / — read-only: return address + on-chain balances.
+POST /setup — one-time on-chain approvals so the wallet can trade on Polymarket.
+              Idempotent: re-running after success is a no-op (no gas spent)."""
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from src.api.schemas import ManagedWalletOut
+from src.api.schemas import ApprovalAction, ManagedWalletOut, WalletSetupOut
 from src.auth.deps import get_current_user
 from src.database.session import get_db
 from src.models import ManagedWallet, User
 from src.utils.logging import get_logger
+from src.wallet.approvals import SetupError, setup_wallet
 from src.wallet.balances import get_balances
 from src.wallet.manager import WalletManager
 
@@ -22,7 +27,6 @@ def get_wallet(
         db.query(ManagedWallet).filter(ManagedWallet.user_id == user.id).first()
     )
     if not wallet:
-        # Should only happen for users created before this feature shipped.
         wallet = WalletManager.get_or_create(user.id, db)
 
     usdc, matic, err = get_balances(wallet.address)
@@ -31,4 +35,33 @@ def get_wallet(
         usdc_balance=usdc,
         matic_balance=matic,
         balance_error=err,
+    )
+
+
+@router.post("/setup", response_model=WalletSetupOut)
+def setup(
+    user: User = Depends(get_current_user), db: Session = Depends(get_db)
+) -> WalletSetupOut:
+    wallet = (
+        db.query(ManagedWallet).filter(ManagedWallet.user_id == user.id).first()
+    )
+    if not wallet:
+        raise HTTPException(status_code=404, detail="No managed wallet for user")
+
+    signer = WalletManager.get_signer(wallet)
+    try:
+        matic, actions = setup_wallet(signer)
+    except SetupError as e:
+        # Surface as 400 — actionable user error (insufficient gas, etc).
+        raise HTTPException(status_code=400, detail=str(e))
+
+    log.info(
+        "setup complete user=%s actions=%s",
+        user.id,
+        ",".join(f"{a['contract']}:{a['status']}" for a in actions),
+    )
+    return WalletSetupOut(
+        address=wallet.address,
+        matic_balance=matic,
+        actions=[ApprovalAction(**a) for a in actions],
     )

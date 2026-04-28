@@ -1,0 +1,108 @@
+"""Pydantic schemas for the HTTP API."""
+from datetime import datetime
+
+from pydantic import BaseModel, EmailStr, Field
+
+
+# --- Auth ---
+class SignupRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8)
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class UserOut(BaseModel):
+    id: int
+    email: EmailStr
+    is_active: bool
+
+    model_config = {"from_attributes": True}
+
+
+# --- Wallets ---
+class WalletAddRequest(BaseModel):
+    address: str
+    label: str | None = None
+
+
+class WalletOut(BaseModel):
+    id: int
+    address: str
+    label: str | None
+    is_active: bool
+
+    model_config = {"from_attributes": True}
+
+
+# --- Settings ---
+class RiskSettingsRequest(BaseModel):
+    sizing_strategy: str | None = None  # "percent" | "fixed"
+    sizing_percent: float | None = None
+    sizing_fixed_usd: float | None = None
+    max_percent_per_trade: float | None = None
+    max_exposure_per_market_usd: float | None = None
+    daily_loss_cap_usd: float | None = None
+    slippage_tolerance_pct: float | None = None
+
+
+class ModeRequest(BaseModel):
+    mode: str  # "paper" | "live"
+
+
+class SettingsOut(BaseModel):
+    mode: str
+    sizing_strategy: str
+    sizing_percent: float
+    sizing_fixed_usd: float
+    max_percent_per_trade: float
+    max_exposure_per_market_usd: float
+    daily_loss_cap_usd: float
+    slippage_tolerance_pct: float
+    paper_balance_usd: float
+
+    model_config = {"from_attributes": True}
+
+
+# --- Bot ---
+class BotStatusOut(BaseModel):
+    status: str
+    last_started_at: datetime | None
+    last_error: str | None
+
+    model_config = {"from_attributes": True}
+
+
+# --- Trades ---
+class TradeOut(BaseModel):
+    id: int
+    source_wallet: str
+    market_id: str
+    outcome: str
+    side: str
+    price: float
+    size: float
+    notional_usd: float
+    mode: str
+    status: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# --- Stats ---
+class WalletStat(BaseModel):
+    wallet: str
+    trades: int
+    notional_usd: float
+
+
+class StatsOut(BaseModel):
+    total_pnl_usd: float
+    total_trades: int
+    win_rate: float
+    roi_pct: float
+    by_wallet: list[WalletStat]

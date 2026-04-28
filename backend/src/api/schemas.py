@@ -93,6 +93,14 @@ class TradeOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# --- Managed wallet ---
+class ManagedWalletOut(BaseModel):
+    address: str
+    usdc_balance: float | None = None
+    matic_balance: float | None = None
+    balance_error: str | None = None  # populated if RPC lookup failed
+
+
 # --- Stats ---
 class WalletStat(BaseModel):
     wallet: str

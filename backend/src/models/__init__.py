@@ -2,6 +2,7 @@
 from .user import User
 from .user_settings import UserSettings
 from .user_wallet import UserWallet
+from .managed_wallet import ManagedWallet
 from .bot_instance import BotInstance
 from .trade import Trade
 from .position import Position
@@ -10,6 +11,7 @@ __all__ = [
     "User",
     "UserSettings",
     "UserWallet",
+    "ManagedWallet",
     "BotInstance",
     "Trade",
     "Position",

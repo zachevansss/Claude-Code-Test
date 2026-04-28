@@ -8,6 +8,8 @@ from src.auth.security import hash_password, verify_password
 from src.database.session import get_db
 from src.models import User, UserSettings
 from src.utils.logging import get_logger
+from src.wallet.crypto import CryptoError
+from src.wallet.manager import WalletManager
 
 router = APIRouter()
 log = get_logger("AUTH")
@@ -20,9 +22,18 @@ def signup(req: SignupRequest, db: Session = Depends(get_db)) -> UserOut:
     user = User(email=req.email, password_hash=hash_password(req.password))
     user.settings = UserSettings()
     db.add(user)
+    db.flush()  # assigns user.id without committing yet
+
+    try:
+        WalletManager.create_for_user(user.id, db)
+    except CryptoError as e:
+        db.rollback()
+        # Surface the actionable hint about MASTER_ENCRYPTION_KEY rather than 500'ing.
+        raise HTTPException(status_code=503, detail=str(e))
+
     db.commit()
     db.refresh(user)
-    log.info("new user signed up: %s", user.email)
+    log.info("new user signed up: %s (managed wallet provisioned)", user.email)
     return user
 
 

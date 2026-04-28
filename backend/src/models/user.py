@@ -21,6 +21,9 @@ class User(Base):
     wallets: Mapped[list["UserWallet"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    managed_wallet: Mapped["ManagedWallet"] = relationship(
+        back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
     bot_instance: Mapped["BotInstance"] = relationship(
         back_populates="user", uselist=False, cascade="all, delete-orphan"
     )

@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from src.config.settings import settings
 from src.database.session import SessionLocal
-from src.executor.engine import ExecutionEngine
+from src.executor.engine import ExecutionEngine, ExecutionRefused
 from src.models import BotInstance, Position, Trade, UserSettings, UserWallet
 from src.risk.manager import RiskManager, RiskRejection
 from src.simulation.engine import SimulationEngine
@@ -178,11 +178,11 @@ class BotManager:
             daily_loss = max(0.0, -todays_realized)
 
             risk = RiskManager(user_settings, balance, exposure, daily_loss)
-            engine = (
-                SimulationEngine(db, user_id)
-                if user_settings.mode == "paper"
-                else ExecutionEngine(db, user_id)
-            )
+            if user_settings.mode == "paper":
+                engine: SimulationEngine | ExecutionEngine = SimulationEngine(db, user_id)
+            else:
+                engine = ExecutionEngine(db, user_id)
+                engine.set_slippage(user_settings.slippage_tolerance_pct)
 
             for sig in fresh:
                 try:
@@ -190,9 +190,11 @@ class BotManager:
                     engine.execute(order, source_wallet=sig.source_wallet)
                 except RiskRejection as e:
                     log.info("risk rejected user=%s: %s", user_id, e)
-                except NotImplementedError as e:
-                    log.error("execution not implemented user=%s: %s", user_id, e)
-                    return  # bail this tick — don't keep retrying live with no executor
+                except ExecutionRefused as e:
+                    # Safety gate triggered — log and stop processing further
+                    # signals this tick. Not an error; a planned stop.
+                    log.warning("execution refused user=%s: %s", user_id, e)
+                    return
 
     def _record_error(self, user_id: int, msg: str) -> None:
         with SessionLocal() as db:

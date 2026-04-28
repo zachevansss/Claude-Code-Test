@@ -17,11 +17,12 @@ from sqlalchemy.orm import Session
 from src.config.settings import settings
 from src.database.session import SessionLocal
 from src.executor.engine import ExecutionEngine, ExecutionRefused
-from src.models import BotInstance, Position, Trade, UserSettings, UserWallet
+from src.models import BotInstance, ManagedWallet, Position, Trade, UserSettings, UserWallet
 from src.risk.manager import RiskManager, RiskRejection
 from src.simulation.engine import SimulationEngine
 from src.tracker.poller import WalletTracker
 from src.utils.logging import get_logger
+from src.wallet.balances import get_usdc_balance
 
 log = get_logger("BOT_MANAGER")
 
@@ -155,7 +156,26 @@ class BotManager:
             if not fresh:
                 return
 
-            balance = user_settings.paper_balance_usd  # TODO: real balance for live mode
+            if user_settings.mode == "paper":
+                balance = user_settings.paper_balance_usd
+            else:
+                managed = (
+                    db.query(ManagedWallet)
+                    .filter(ManagedWallet.user_id == user_id)
+                    .first()
+                )
+                if not managed:
+                    log.warning("user=%s in live mode has no managed wallet — skipping tick", user_id)
+                    return
+                live_balance = get_usdc_balance(managed.address)
+                if live_balance is None:
+                    log.warning(
+                        "user=%s live balance lookup failed — skipping tick (will retry next interval)",
+                        user_id,
+                    )
+                    return
+                balance = live_balance
+
             exposure: dict[str, float] = {}
             for p in (
                 db.query(Position)

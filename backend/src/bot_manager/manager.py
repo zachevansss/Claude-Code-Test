@@ -156,6 +156,21 @@ class BotManager:
             if not fresh:
                 return
 
+            # Reconcile any open live orders against the CLOB before computing
+            # exposure or sizing new orders. Failures here are non-fatal — we
+            # log and proceed; next tick will retry.
+            live_engine: ExecutionEngine | None = None
+            if user_settings.mode == "live":
+                live_engine = ExecutionEngine(db, user_id)
+                try:
+                    live_engine.reconcile_open_orders()
+                except ExecutionRefused as e:
+                    # Safety gate (e.g. no managed wallet). Skip this tick.
+                    log.warning("reconcile refused user=%s: %s", user_id, e)
+                    return
+                except Exception as e:  # noqa: BLE001
+                    log.warning("reconcile error user=%s: %s — continuing tick", user_id, e)
+
             if user_settings.mode == "paper":
                 balance = user_settings.paper_balance_usd
             else:
@@ -186,6 +201,28 @@ class BotManager:
                     exposure.get(p.market_id, 0.0) + p.size * p.avg_price
                 )
 
+            # In live mode, also reserve notional for in-flight orders that
+            # haven't filled yet. Without this, a second signal in the same
+            # market could push the user past per-market caps before the first
+            # order's fill is reflected in Position.
+            if user_settings.mode == "live":
+                open_trades = (
+                    db.query(Trade)
+                    .filter(
+                        Trade.user_id == user_id,
+                        Trade.mode == "live",
+                        Trade.status.in_(["submitted", "partial"]),
+                    )
+                    .all()
+                )
+                for t in open_trades:
+                    filled = t.filled_size or 0.0
+                    unfilled = max(0.0, t.size - filled)
+                    if unfilled > 0:
+                        exposure[t.market_id] = (
+                            exposure.get(t.market_id, 0.0) + unfilled * t.price
+                        )
+
             since = _today_utc_start()
             todays_realized = sum(
                 p.realized_pnl_usd
@@ -201,7 +238,10 @@ class BotManager:
             if user_settings.mode == "paper":
                 engine: SimulationEngine | ExecutionEngine = SimulationEngine(db, user_id)
             else:
-                engine = ExecutionEngine(db, user_id)
+                # Reuse the engine instance from reconcile so the CLOB client +
+                # API creds stay cached across the tick.
+                assert live_engine is not None  # mode == "live" branch above always set this
+                engine = live_engine
                 engine.set_slippage(user_settings.slippage_tolerance_pct)
 
             for sig in fresh:

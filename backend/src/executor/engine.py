@@ -160,40 +160,12 @@ class ExecutionEngine:
         )
         self.db.add(trade)
 
-        # Update position book the same way simulation does. Note: `price` here
-        # is the limit we offered, not the actual fill price — refine when we
-        # poll order status post-submission to reconcile against fills.
-        pos = (
-            self.db.query(Position)
-            .filter(
-                Position.user_id == self.user_id,
-                Position.market_id == order.market_id,
-                Position.outcome == order.outcome,
-                Position.mode == "live",
-            )
-            .first()
-        )
-        if pos is None:
-            pos = Position(
-                user_id=self.user_id,
-                market_id=order.market_id,
-                outcome=order.outcome,
-                mode="live",
-            )
-            self.db.add(pos)
-
-        if order.side == "buy":
-            new_size = pos.size + order.size
-            if new_size > 0:
-                pos.avg_price = (
-                    pos.avg_price * pos.size + limit * order.size
-                ) / new_size
-            pos.size = new_size
-        else:
-            close_size = min(pos.size, order.size)
-            pos.realized_pnl_usd += (limit - pos.avg_price) * close_size
-            pos.size = max(0.0, pos.size - order.size)
-
+        # Position is NOT updated here. The limit price is provisional and the
+        # fill might be partial, better-priced, or never happen. reconcile_open_orders()
+        # is the single source of truth for live Position rows; it polls actual fills
+        # and replays Position from `filled`/`partial` trades. The bot loop calls
+        # reconcile() before computing exposure each tick so risk sees up-to-date data,
+        # and adds open-submitted notional on top to account for in-flight orders.
         self.db.commit()
         self.db.refresh(trade)
         log.info(
@@ -202,3 +174,151 @@ class ExecutionEngine:
             limit, order.size, order_id,
         )
         return trade
+
+    # -- reconciliation -----------------------------------------------------
+
+    @staticmethod
+    def _coerce_float(value, default: float) -> float:
+        try:
+            return float(value) if value is not None else default
+        except (ValueError, TypeError):
+            return default
+
+    @staticmethod
+    def _map_clob_status(clob_status: str, size_matched: float, ordered_size: float) -> str:
+        clob_status = (clob_status or "").upper()
+        if clob_status == "FILLED" or (ordered_size > 0 and size_matched >= ordered_size):
+            return "filled"
+        if clob_status == "MATCHED":
+            # MATCHED means trade matched on the book but may not be settled yet.
+            # Treat partial-match as partial; full-match as filled.
+            return "filled" if size_matched >= ordered_size else "partial"
+        if clob_status == "CANCELED":
+            return "cancelled"
+        if clob_status == "EXPIRED":
+            return "expired"
+        if size_matched > 0:
+            return "partial"
+        return "submitted"
+
+    def _replay_position(self, market_id: str, outcome: str) -> None:
+        """Rebuild the live Position row for (market, outcome) from filled trades.
+        Idempotent — call after any Trade fill data changes."""
+        trades = (
+            self.db.query(Trade)
+            .filter(
+                Trade.user_id == self.user_id,
+                Trade.market_id == market_id,
+                Trade.outcome == outcome,
+                Trade.mode == "live",
+                Trade.status.in_(["filled", "partial"]),
+            )
+            .order_by(Trade.created_at.asc(), Trade.id.asc())
+            .all()
+        )
+
+        pos = (
+            self.db.query(Position)
+            .filter(
+                Position.user_id == self.user_id,
+                Position.market_id == market_id,
+                Position.outcome == outcome,
+                Position.mode == "live",
+            )
+            .first()
+        )
+        if pos is None:
+            pos = Position(
+                user_id=self.user_id,
+                market_id=market_id,
+                outcome=outcome,
+                mode="live",
+            )
+            self.db.add(pos)
+
+        pos.size = 0.0
+        pos.avg_price = 0.0
+        pos.realized_pnl_usd = 0.0
+
+        for t in trades:
+            size_used = t.filled_size if t.filled_size is not None else t.size
+            price_used = t.fill_price if t.fill_price is not None else t.price
+            if size_used <= 0:
+                continue
+            if t.side == "buy":
+                new_size = pos.size + size_used
+                if new_size > 0:
+                    pos.avg_price = (
+                        pos.avg_price * pos.size + price_used * size_used
+                    ) / new_size
+                pos.size = new_size
+            else:
+                close_size = min(pos.size, size_used)
+                pos.realized_pnl_usd += (price_used - pos.avg_price) * close_size
+                pos.size = max(0.0, pos.size - size_used)
+
+    def reconcile_open_orders(self) -> int:
+        """Poll the CLOB for every open submitted/partial live trade, write
+        actual fill_price/filled_size/status, and replay any Position rows that
+        were touched. Returns the number of trade rows updated."""
+        open_trades = (
+            self.db.query(Trade)
+            .filter(
+                Trade.user_id == self.user_id,
+                Trade.mode == "live",
+                Trade.status.in_(["submitted", "partial"]),
+                Trade.clob_order_id.isnot(None),
+            )
+            .all()
+        )
+        if not open_trades:
+            return 0
+
+        wallet = self._load_wallet()
+        client = self._get_client(wallet)
+
+        touched_keys: set[tuple[str, str]] = set()
+        updated = 0
+
+        for trade in open_trades:
+            try:
+                resp = client.get_order(trade.clob_order_id)
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "get_order failed user=%s clob=%s: %s",
+                    self.user_id, trade.clob_order_id, e,
+                )
+                continue
+            if not resp:
+                continue
+
+            clob_status = resp.get("status")
+            size_matched = self._coerce_float(resp.get("size_matched"), 0.0)
+            avg_fill_price = self._coerce_float(resp.get("price"), trade.price)
+            new_status = self._map_clob_status(clob_status, size_matched, trade.size)
+
+            changed = (
+                trade.status != new_status
+                or (trade.filled_size or 0.0) != size_matched
+                or trade.fill_price != avg_fill_price
+            )
+            if not changed:
+                continue
+
+            trade.status = new_status
+            trade.filled_size = size_matched
+            trade.fill_price = avg_fill_price
+            touched_keys.add((trade.market_id, trade.outcome))
+            updated += 1
+            log.info(
+                "reconcile user=%s trade=%s %s %s filled=%.4f/%.4f avg=%.4f",
+                self.user_id, trade.id, trade.outcome, new_status,
+                size_matched, trade.size, avg_fill_price,
+            )
+
+        for market_id, outcome in touched_keys:
+            self._replay_position(market_id, outcome)
+
+        if updated:
+            self.db.commit()
+        return updated

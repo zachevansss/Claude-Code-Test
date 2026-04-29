@@ -34,6 +34,50 @@ class WalletManager:
         return wallet
 
     @staticmethod
+    def import_for_user(
+        user_id: int, private_key_hex: str, db: Session, replace_existing: bool = False
+    ) -> ManagedWallet:
+        """Import an existing EOA from a hex private key. By default refuses if
+        a managed wallet already exists for this user — pass replace_existing=True
+        to overwrite. Validation: Account.from_key raises on a malformed key.
+
+        Never log the private key. Only the derived address is safe to log."""
+        key_clean = private_key_hex.strip()
+        if key_clean.startswith("0x") or key_clean.startswith("0X"):
+            key_clean = key_clean[2:]
+        if len(key_clean) != 64:
+            raise ValueError("private key must be 32 bytes / 64 hex chars (with optional 0x prefix)")
+        try:
+            acct: LocalAccount = Account.from_key(bytes.fromhex(key_clean))
+        except Exception as e:  # noqa: BLE001
+            raise ValueError(f"invalid private key: {e}") from e
+
+        existing = (
+            db.query(ManagedWallet).filter(ManagedWallet.user_id == user_id).first()
+        )
+        encrypted = encrypt(acct.key)
+        if existing:
+            if not replace_existing:
+                raise ValueError(
+                    "user already has a managed wallet — pass replace_existing=true to overwrite"
+                )
+            existing.address = acct.address.lower()
+            existing.encrypted_private_key = encrypted
+            db.flush()
+            log.info("replaced managed wallet for user=%s address=%s", user_id, existing.address)
+            return existing
+
+        wallet = ManagedWallet(
+            user_id=user_id,
+            address=acct.address.lower(),
+            encrypted_private_key=encrypted,
+        )
+        db.add(wallet)
+        db.flush()
+        log.info("imported managed wallet for user=%s address=%s", user_id, wallet.address)
+        return wallet
+
+    @staticmethod
     def get_or_create(user_id: int, db: Session) -> ManagedWallet:
         existing = (
             db.query(ManagedWallet).filter(ManagedWallet.user_id == user_id).first()

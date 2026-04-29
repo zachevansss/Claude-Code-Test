@@ -6,10 +6,15 @@ POST /setup — one-time on-chain approvals so the wallet can trade on Polymarke
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from src.api.schemas import ApprovalAction, ManagedWalletOut, WalletSetupOut
+from src.api.schemas import (
+    ApprovalAction,
+    ManagedWalletOut,
+    WalletImportRequest,
+    WalletSetupOut,
+)
 from src.auth.deps import get_current_user
 from src.database.session import get_db
-from src.models import ManagedWallet, User
+from src.models import ManagedWallet, Trade, User
 from src.utils.logging import get_logger
 from src.wallet.approvals import SetupError, setup_wallet
 from src.wallet.balances import get_balances
@@ -28,6 +33,53 @@ def get_wallet(
     )
     if not wallet:
         wallet = WalletManager.get_or_create(user.id, db)
+
+    usdc, matic, err = get_balances(wallet.address)
+    return ManagedWalletOut(
+        address=wallet.address,
+        usdc_balance=usdc,
+        matic_balance=matic,
+        balance_error=err,
+    )
+
+
+@router.post("/import", response_model=ManagedWalletOut)
+def import_wallet(
+    req: WalletImportRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ManagedWalletOut:
+    """Replace the auto-generated managed wallet with one from a user-supplied
+    private key. Use case: reuse an existing funded Polymarket EOA instead of
+    moving funds to a fresh address.
+
+    Refuses if any live trades already exist for this user — overwriting the
+    wallet would orphan their on-chain positions from the platform's view of
+    them. Burn down to zero live exposure before importing if you need to."""
+    if req.replace_existing:
+        live_trade_count = (
+            db.query(Trade)
+            .filter(Trade.user_id == user.id, Trade.mode == "live")
+            .count()
+        )
+        if live_trade_count > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"user has {live_trade_count} live trade(s) — refusing to "
+                    "overwrite managed wallet. Close live positions first or "
+                    "delete the trade history if this is dev-only."
+                ),
+            )
+
+    try:
+        wallet = WalletManager.import_for_user(
+            user.id, req.private_key, db, replace_existing=req.replace_existing
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.commit()
+    db.refresh(wallet)
 
     usdc, matic, err = get_balances(wallet.address)
     return ManagedWalletOut(

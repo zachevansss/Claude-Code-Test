@@ -114,6 +114,13 @@ class WalletSetupOut(BaseModel):
     actions: list[ApprovalAction]
 
 
+class WalletImportRequest(BaseModel):
+    private_key: str
+    # Required when overwriting an existing managed wallet. Refused if any live
+    # trades already exist for the user (would orphan position state).
+    replace_existing: bool = False
+
+
 # --- Stats ---
 class WalletStat(BaseModel):
     wallet: str

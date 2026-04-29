@@ -42,6 +42,22 @@ def _load_seen_tx(db: Session, user_id: int) -> set[str]:
     return {r[0] for r in rows if r[0]}
 
 
+def _paper_balance(db: Session, user_id: int, starting_bankroll: float) -> float:
+    """Available paper cash = starting bankroll - capital tied up in open
+    positions (size * avg_price) + realized PnL on closes. Goes up and down
+    as trades fill so the bot can't spend money it doesn't have."""
+    committed = 0.0
+    realized = 0.0
+    for p in (
+        db.query(Position)
+        .filter(Position.user_id == user_id, Position.mode == "paper")
+        .all()
+    ):
+        committed += p.size * p.avg_price
+        realized += p.realized_pnl_usd
+    return max(0.0, starting_bankroll - committed + realized)
+
+
 class BotManager:
     def __init__(self) -> None:
         self._tasks: dict[int, asyncio.Task] = {}
@@ -172,7 +188,9 @@ class BotManager:
                     log.warning("reconcile error user=%s: %s — continuing tick", user_id, e)
 
             if user_settings.mode == "paper":
-                balance = user_settings.paper_balance_usd
+                balance = _paper_balance(
+                    db, user_id, user_settings.paper_balance_usd
+                )
             else:
                 managed = (
                     db.query(ManagedWallet)
@@ -255,6 +273,22 @@ class BotManager:
                 try:
                     order = risk.size(sig)
                     engine.execute(order, source_wallet=sig.source_wallet)
+                    # Refresh per-market exposure and available balance so
+                    # subsequent signals in this tick see post-fill state.
+                    # Buy: commits cash, adds to exposure. Sell: returns cash,
+                    # reduces exposure (we approximate the sell delta as the
+                    # full notional; the next tick reads exact state from DB).
+                    if order.side == "buy":
+                        exposure[order.market_id] = (
+                            exposure.get(order.market_id, 0.0) + order.notional_usd
+                        )
+                        risk.balance_usd = max(0.0, risk.balance_usd - order.notional_usd)
+                    else:  # sell
+                        exposure[order.market_id] = max(
+                            0.0,
+                            exposure.get(order.market_id, 0.0) - order.notional_usd,
+                        )
+                        risk.balance_usd += order.notional_usd
                 except RiskRejection as e:
                     log.info("risk rejected user=%s: %s", user_id, e)
                 except ExecutionRefused as e:

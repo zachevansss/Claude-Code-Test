@@ -84,9 +84,11 @@ class RiskManager:
         max_per_trade = self.balance_usd * (self.settings.max_percent_per_trade / 100.0)
         notional = min(notional, max_per_trade)
 
-        # 3. Cap by remaining exposure budget on this market.
+        # 3. Cap by remaining exposure budget on this market. The cap is a
+        # fraction of *current* balance so it tracks the bankroll up and down.
+        market_cap = self.balance_usd * (self.settings.max_exposure_per_market_pct / 100.0)
         used = self.exposure_by_market_usd.get(signal.market_id, 0.0)
-        remaining = max(0.0, self.settings.max_exposure_per_market_usd - used)
+        remaining = max(0.0, market_cap - used)
         notional = min(notional, remaining)
 
         if notional <= 0:

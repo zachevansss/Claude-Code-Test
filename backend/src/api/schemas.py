@@ -46,7 +46,7 @@ class RiskSettingsRequest(BaseModel):
     mirror_scale: float | None = None        # multiplier on source notional (mirror only)
     min_trade_usd: float | None = None       # floor; signals below this are skipped (mirror only)
     max_percent_per_trade: float | None = None
-    max_exposure_per_market_usd: float | None = None
+    max_exposure_per_market_pct: float | None = None
     daily_loss_cap_usd: float | None = None
     slippage_tolerance_pct: float | None = None
 
@@ -63,7 +63,7 @@ class SettingsOut(BaseModel):
     mirror_scale: float
     min_trade_usd: float
     max_percent_per_trade: float
-    max_exposure_per_market_usd: float
+    max_exposure_per_market_pct: float
     daily_loss_cap_usd: float
     slippage_tolerance_pct: float
     paper_balance_usd: float

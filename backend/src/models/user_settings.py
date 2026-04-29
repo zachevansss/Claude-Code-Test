@@ -28,7 +28,10 @@ class UserSettings(Base):
 
     # Risk caps
     max_percent_per_trade: Mapped[float] = mapped_column(Float, default=5.0, nullable=False)
-    max_exposure_per_market_usd: Mapped[float] = mapped_column(Float, default=100.0, nullable=False)
+    # Per-market exposure cap as a % of current balance, so the cap rises and
+    # falls with bankroll. e.g. 10.0 = no single market may hold more than 10%
+    # of available capital at any time.
+    max_exposure_per_market_pct: Mapped[float] = mapped_column(Float, default=10.0, nullable=False)
     daily_loss_cap_usd: Mapped[float] = mapped_column(Float, default=50.0, nullable=False)
 
     # Execution

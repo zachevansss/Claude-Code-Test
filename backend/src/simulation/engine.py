@@ -45,11 +45,16 @@ class SimulationEngine:
             .first()
         )
         if pos is None:
+            # Explicit zero init — SQLAlchemy's Column default=0.0 only fires
+            # on flush, but the math below runs pre-flush.
             pos = Position(
                 user_id=self.user_id,
                 market_id=order.market_id,
                 outcome=order.outcome,
                 mode="paper",
+                size=0.0,
+                avg_price=0.0,
+                realized_pnl_usd=0.0,
             )
             self.db.add(pos)
 

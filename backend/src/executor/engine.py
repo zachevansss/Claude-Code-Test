@@ -140,7 +140,8 @@ class ExecutionEngine:
             raise last_err
 
         # Persist the trade. We use the source-wallet tx as external_tx for
-        # cross-tick dedupe; the CLOB order id goes in `status` for traceability.
+        # cross-tick dedupe. The CLOB order id is stored separately so the
+        # reconciler can poll it without parsing strings.
         trade = Trade(
             user_id=self.user_id,
             source_wallet=source_wallet,
@@ -152,8 +153,9 @@ class ExecutionEngine:
             size=order.size,
             notional_usd=limit * order.size,
             mode="live",
-            status=f"submitted:{order_id}" if order_id else "submitted",
+            status="submitted",
             external_tx=order.external_tx,
+            clob_order_id=order_id,
             created_at=datetime.utcnow(),
         )
         self.db.add(trade)

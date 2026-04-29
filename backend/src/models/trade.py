@@ -23,8 +23,16 @@ class Trade(Base):
     notional_usd: Mapped[float] = mapped_column(Float, nullable=False)
 
     mode: Mapped[str] = mapped_column(String(16), nullable=False)  # "paper" | "live"
-    status: Mapped[str] = mapped_column(String(16), default="filled", nullable=False)
+    # status values: "submitted" | "filled" | "partial" | "cancelled" | "expired"
+    # Paper trades skip "submitted" and go straight to "filled".
+    status: Mapped[str] = mapped_column(String(32), default="filled", nullable=False)
     external_tx: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    # Live-only: CLOB order id returned by Polymarket on submission. Used to
+    # poll order status and reconcile fill_price/filled_size against the limit.
+    clob_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    filled_size: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False, index=True

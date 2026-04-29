@@ -102,7 +102,7 @@ class ManagedWalletOut(BaseModel):
 
 
 class ApprovalAction(BaseModel):
-    contract: str       # "USDC" | "CTF"
+    contract: str       # e.g. "USDC->CTF Exchange", "CTF->NegRisk Exchange"
     spender: str        # checksummed address
     status: str         # "approved" | "already"
     tx: str | None      # tx hash if a transaction was sent, None if skipped

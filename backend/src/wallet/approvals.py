@@ -1,16 +1,22 @@
 """One-time on-chain approvals so a managed wallet can trade on Polymarket.
 
-What we approve:
-  1. USDC.approve(CTF_Exchange, max)         — exchange can pull USDC for buys
-  2. CTF.setApprovalForAll(CTF_Exchange, True) — exchange can move outcome tokens
+What we approve, for both the standard CTF Exchange AND the NegRisk Exchange
+(many Polymarket markets — political, multi-outcome — route through neg-risk):
+  1. USDC.approve(<exchange>, max)          — exchange can pull USDC for buys
+  2. CTF.setApprovalForAll(<exchange>, True) — exchange can move outcome tokens
 
-Both are sent as legacy gas (not EIP-1559) for broad RPC compatibility on Polygon.
-We check current allowance/approval first so a re-run costs no gas if everything
-is already set.
+Both contracts share the same USDC token and the same CTF (conditional tokens)
+contract; only the spender/operator differs. Per-spender allowances and
+approvals are independent, so each exchange needs its own pair.
 
-NOT YET HANDLED (Polymarket negative-risk markets): the NEG_RISK_EXCHANGE and
-NEG_RISK_ADAPTER contracts also need their own USDC + CTF approvals. Add when
-you start trading negative-risk markets — same pattern, two more tx pairs."""
+Txs are sent as legacy gas (not EIP-1559) for broad RPC compatibility on
+Polygon. We check current allowance/approval first so a re-run costs no gas
+if everything is already set.
+
+NOT HANDLED: the NegRisk Adapter contract (used for split/merge/redeem of
+neg-risk positions) is separate. The bot only places limit orders, which the
+exchange approvals above cover. Redemption after market resolution is done
+manually via the Polymarket UI."""
 from typing import Any
 
 from eth_account.signers.local import LocalAccount
@@ -24,8 +30,14 @@ from src.wallet.balances import USDC_ADDRESS
 log = get_logger("WALLET")
 
 # Polymarket on Polygon — verify against current Polymarket docs before mainnet use.
+# Sourced from py_clob_client/config.py (the SDK's own mapping).
 CTF_ADDRESS = Web3.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")
 CTF_EXCHANGE = Web3.to_checksum_address("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E")
+NEG_RISK_EXCHANGE = Web3.to_checksum_address("0xC5d563A36AE78145C45a50134d48A1215220f80a")
+EXCHANGES: list[tuple[str, str]] = [
+    ("CTF Exchange", CTF_EXCHANGE),
+    ("NegRisk Exchange", NEG_RISK_EXCHANGE),
+]
 
 MAX_UINT256 = 2**256 - 1
 APPROVE_THRESHOLD = 2**200  # if allowance >= this, treat as "already approved max"
@@ -133,23 +145,24 @@ def setup_wallet(signer: LocalAccount) -> tuple[float, list[dict[str, Any]]]:
     actions: list[dict[str, Any]] = []
     nonce = w3.eth.get_transaction_count(addr)
 
-    # 1. USDC allowance check + approve
-    current_allowance = usdc.functions.allowance(addr, CTF_EXCHANGE).call()
-    if current_allowance >= APPROVE_THRESHOLD:
-        actions.append({"contract": "USDC", "spender": CTF_EXCHANGE, "status": "already", "tx": None})
-    else:
-        tx = _send(w3, signer, usdc, "approve", (CTF_EXCHANGE, MAX_UINT256), gas_limit=120_000, nonce=nonce)
-        nonce += 1
-        actions.append({"contract": "USDC", "spender": CTF_EXCHANGE, "status": "approved", "tx": tx})
-        log.info("USDC approve sent: %s", tx)
+    for label, spender in EXCHANGES:
+        # USDC allowance check + approve
+        current_allowance = usdc.functions.allowance(addr, spender).call()
+        if current_allowance >= APPROVE_THRESHOLD:
+            actions.append({"contract": f"USDC->{label}", "spender": spender, "status": "already", "tx": None})
+        else:
+            tx = _send(w3, signer, usdc, "approve", (spender, MAX_UINT256), gas_limit=120_000, nonce=nonce)
+            nonce += 1
+            actions.append({"contract": f"USDC->{label}", "spender": spender, "status": "approved", "tx": tx})
+            log.info("USDC approve %s sent: %s", label, tx)
 
-    # 2. CTF setApprovalForAll check + approve
-    already_approved = ctf.functions.isApprovedForAll(addr, CTF_EXCHANGE).call()
-    if already_approved:
-        actions.append({"contract": "CTF", "spender": CTF_EXCHANGE, "status": "already", "tx": None})
-    else:
-        tx = _send(w3, signer, ctf, "setApprovalForAll", (CTF_EXCHANGE, True), gas_limit=120_000, nonce=nonce)
-        actions.append({"contract": "CTF", "spender": CTF_EXCHANGE, "status": "approved", "tx": tx})
-        log.info("CTF setApprovalForAll sent: %s", tx)
+        # CTF setApprovalForAll check + approve
+        if ctf.functions.isApprovedForAll(addr, spender).call():
+            actions.append({"contract": f"CTF->{label}", "spender": spender, "status": "already", "tx": None})
+        else:
+            tx = _send(w3, signer, ctf, "setApprovalForAll", (spender, True), gas_limit=120_000, nonce=nonce)
+            nonce += 1
+            actions.append({"contract": f"CTF->{label}", "spender": spender, "status": "approved", "tx": tx})
+            log.info("CTF setApprovalForAll %s sent: %s", label, tx)
 
     return matic, actions

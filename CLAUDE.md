@@ -73,7 +73,7 @@ python main.py             # uvicorn on :8000, /docs for interactive
 - `wallet/crypto.py` — Fernet encrypt/decrypt for private keys. Refuses to operate without a valid `MASTER_ENCRYPTION_KEY`. CLI: `python -m src.wallet.crypto generate` mints a fresh key.
 - `wallet/manager.py` — `WalletManager` (static methods): `create_for_user`, `import_for_user`, `get_or_create`, `get_signer`, `get_private_key_hex`. Generation uses `eth_account.Account.create()` (CSPRNG); import accepts a hex private key (with or without `0x`), validates it via `Account.from_key`, and refuses to overwrite an existing wallet unless `replace_existing=True`.
 - `wallet/balances.py` — read-only on-chain lookups (`get_balances`, `get_usdc_balance`). Returns `None` on RPC failure rather than raising; callers decide how to react.
-- `wallet/approvals.py` — `setup_wallet(signer)` runs the one-time on-chain approvals (USDC.approve + CTF.setApprovalForAll for the CTF Exchange). Idempotent — checks current allowance/approval first and skips if already set. Negative-risk markets need additional approvals not yet wired (see file).
+- `wallet/approvals.py` — `setup_wallet(signer)` runs the one-time on-chain approvals (USDC.approve + CTF.setApprovalForAll) for **both** the standard CTF Exchange and the NegRisk Exchange. Idempotent — checks current allowance/approval per spender and skips if already set. Up to 4 txs on first run, 0 on re-run. NegRisk Adapter (split/merge/redeem) is *not* approved here — bot only places limit orders, and resolution-time redemption is done manually via the Polymarket UI.
 - `auth/{security,jwt,deps}.py` — bcrypt hashing, JWT encode/decode, `get_current_user` dep
 - `api/app.py` — app factory; lifespan hook creates tables, runs `database/bootstrap.ensure_columns` to ALTER TABLE in any model-declared columns missing from the live SQLite DB (additive only — stand-in for Alembic), then calls `bot_manager.restart_all()`.
 - `database/bootstrap.py` — idempotent SQLite-only column reconciler. Walks every Base.metadata table and ADDs nullable columns the live DB is missing. Refuses non-nullable adds without a default; logs each ALTER. PostgreSQL deployments must use Alembic instead.
@@ -119,7 +119,6 @@ Per-user EOA, key generated via `eth_account.Account.create()` on signup, encryp
 
 ### Known gaps still to close
 - **Withdrawals** — `POST /wallet/withdraw` not yet implemented. For SaaS, needs strong auth (2FA / email confirm / cooldown).
-- **Negative-risk market approvals** — `wallet/approvals.py` covers the CTF Exchange but not the Neg Risk Exchange/Adapter. Add when you start trading negative-risk markets.
 - **Async-friendliness** — `py-clob-client` is sync; `.execute()` and `reconcile_open_orders()` briefly block the event loop. Wrap with `asyncio.to_thread()` past ~50 concurrent users.
 - **Alembic migrations** — schema is `Base.metadata.create_all` plus the additive `database/bootstrap.py` SQLite ALTER helper. Before PostgreSQL, swap both for proper migrations.
 - **Analytics counts in-flight live trades** — `analytics/engine.py` uses `len(trades)` for `total_trades` regardless of status. Filter to filled/partial when surfacing live-mode stats.

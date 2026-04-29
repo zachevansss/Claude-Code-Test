@@ -21,6 +21,12 @@ desktop.ini
 *.pem
 *.key
 
+# SQLite databases (per-deployment user data)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
 # Node
 node_modules/
 npm-debug.log*

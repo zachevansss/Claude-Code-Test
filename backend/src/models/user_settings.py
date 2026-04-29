@@ -13,10 +13,18 @@ class UserSettings(Base):
 
     mode: Mapped[str] = mapped_column(String(16), default="paper", nullable=False)
 
-    # Sizing strategy
+    # Sizing strategy: "percent" | "fixed" | "mirror"
+    #   percent — sizing_percent of (balance - in_flight_notional) per trade
+    #   fixed   — sizing_fixed_usd per trade
+    #   mirror  — source_notional_usd * mirror_scale per trade; skipped if < min_trade_usd
     sizing_strategy: Mapped[str] = mapped_column(String(16), default="percent", nullable=False)
     sizing_percent: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
     sizing_fixed_usd: Mapped[float] = mapped_column(Float, default=10.0, nullable=False)
+    # Mirror-strategy params. mirror_scale is the multiplier on source's USD
+    # notional (1.0 = match dollar-for-dollar). min_trade_usd is the floor
+    # below which signals are skipped rather than boosted.
+    mirror_scale: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    min_trade_usd: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
 
     # Risk caps
     max_percent_per_trade: Mapped[float] = mapped_column(Float, default=5.0, nullable=False)

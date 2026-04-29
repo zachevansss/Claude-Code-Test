@@ -202,9 +202,13 @@ class BotManager:
                 )
 
             # In live mode, also reserve notional for in-flight orders that
-            # haven't filled yet. Without this, a second signal in the same
-            # market could push the user past per-market caps before the first
-            # order's fill is reflected in Position.
+            # haven't filled yet. Two distinct effects:
+            #   1. add unfilled notional to per-market exposure → per-market cap
+            #      can't be blown by stacked orders before the first fill lands
+            #   2. subtract total in-flight from balance → base sizing % shrinks
+            #      as concurrent orders accumulate, so a high-frequency source
+            #      doesn't exhaust the wallet by submitting hundreds in parallel
+            in_flight_total = 0.0
             if user_settings.mode == "live":
                 open_trades = (
                     db.query(Trade)
@@ -219,9 +223,12 @@ class BotManager:
                     filled = t.filled_size or 0.0
                     unfilled = max(0.0, t.size - filled)
                     if unfilled > 0:
+                        unfilled_notional = unfilled * t.price
                         exposure[t.market_id] = (
-                            exposure.get(t.market_id, 0.0) + unfilled * t.price
+                            exposure.get(t.market_id, 0.0) + unfilled_notional
                         )
+                        in_flight_total += unfilled_notional
+                balance = max(0.0, balance - in_flight_total)
 
             since = _today_utc_start()
             todays_realized = sum(

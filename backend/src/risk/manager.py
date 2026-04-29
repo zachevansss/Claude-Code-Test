@@ -59,13 +59,28 @@ class RiskManager:
                 f"({self.daily_loss_usd:.2f} >= {self.settings.daily_loss_cap_usd:.2f})"
             )
 
-        # 1. Base sizing strategy.
-        if self.settings.sizing_strategy == "percent":
-            notional = self.balance_usd * (self.settings.sizing_percent / 100.0)
-        else:  # "fixed"
-            notional = self.settings.sizing_fixed_usd
+        if signal.price <= 0:
+            raise RiskRejection(f"non-positive signal price: {signal.price}")
+        source_notional = signal.price * signal.size
 
-        # 2. Cap by max % per trade.
+        # 1. Base sizing strategy.
+        strategy = self.settings.sizing_strategy
+        if strategy == "percent":
+            notional = self.balance_usd * (self.settings.sizing_percent / 100.0)
+        elif strategy == "fixed":
+            notional = self.settings.sizing_fixed_usd
+        elif strategy == "mirror":
+            notional = source_notional * self.settings.mirror_scale
+            min_floor = self.settings.min_trade_usd
+            if notional < min_floor:
+                raise RiskRejection(
+                    f"mirror size {notional:.4f} < min_trade_usd {min_floor:.2f} — skipping"
+                )
+        else:
+            raise RiskRejection(f"unknown sizing_strategy: {strategy!r}")
+
+        # 2. Cap by max % per trade. Computed against balance (already net of
+        # in-flight in BotManager) so concurrent orders self-throttle.
         max_per_trade = self.balance_usd * (self.settings.max_percent_per_trade / 100.0)
         notional = min(notional, max_per_trade)
 
@@ -76,8 +91,6 @@ class RiskManager:
 
         if notional <= 0:
             raise RiskRejection("zero or negative notional after caps")
-        if signal.price <= 0:
-            raise RiskRejection(f"non-positive signal price: {signal.price}")
 
         size = notional / signal.price
         log.info(

@@ -40,9 +40,11 @@ class WalletOut(BaseModel):
 
 # --- Settings ---
 class RiskSettingsRequest(BaseModel):
-    sizing_strategy: str | None = None  # "percent" | "fixed"
+    sizing_strategy: str | None = None  # "percent" | "fixed" | "mirror"
     sizing_percent: float | None = None
     sizing_fixed_usd: float | None = None
+    mirror_scale: float | None = None        # multiplier on source notional (mirror only)
+    min_trade_usd: float | None = None       # floor; signals below this are skipped (mirror only)
     max_percent_per_trade: float | None = None
     max_exposure_per_market_usd: float | None = None
     daily_loss_cap_usd: float | None = None
@@ -58,6 +60,8 @@ class SettingsOut(BaseModel):
     sizing_strategy: str
     sizing_percent: float
     sizing_fixed_usd: float
+    mirror_scale: float
+    min_trade_usd: float
     max_percent_per_trade: float
     max_exposure_per_market_usd: float
     daily_loss_cap_usd: float

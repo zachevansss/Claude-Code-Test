@@ -35,8 +35,11 @@ def set_risk(
     db: Session = Depends(get_db),
 ) -> SettingsOut:
     s = _get_settings(db, user.id)
-    if req.sizing_strategy is not None and req.sizing_strategy not in {"percent", "fixed"}:
-        raise HTTPException(status_code=400, detail="sizing_strategy must be 'percent' or 'fixed'")
+    if req.sizing_strategy is not None and req.sizing_strategy not in {"percent", "fixed", "mirror"}:
+        raise HTTPException(
+            status_code=400,
+            detail="sizing_strategy must be 'percent', 'fixed', or 'mirror'",
+        )
     for field, value in req.model_dump(exclude_unset=True).items():
         setattr(s, field, value)
     db.commit()

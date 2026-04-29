@@ -48,3 +48,18 @@ def ensure_columns(engine: Engine) -> None:
                 ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col_type}'
                 log.info("schema bootstrap: %s", ddl)
                 conn.execute(text(ddl))
+
+                # Backfill NULLs to the column's Python default for non-nullable
+                # cols. SQLite ALTER TABLE ADD COLUMN doesn't apply Python-side
+                # `default=` to existing rows; without this, the next read would
+                # surface None where the model promises a float/int/etc.
+                if not col.nullable and col.default is not None and not callable(col.default.arg):
+                    default_val = col.default.arg
+                    log.info(
+                        "schema bootstrap: backfill %s.%s = %r",
+                        table.name, col.name, default_val,
+                    )
+                    conn.execute(
+                        text(f'UPDATE "{table.name}" SET "{col.name}" = :v WHERE "{col.name}" IS NULL'),
+                        {"v": default_val},
+                    )

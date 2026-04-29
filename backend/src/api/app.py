@@ -11,6 +11,7 @@ from src.api.routers import wallets
 from src.bot_manager.manager import bot_manager
 from src.config.settings import settings
 from src.database.base import Base
+from src.database.bootstrap import ensure_columns
 from src.database.session import engine
 from src.utils.logging import get_logger
 
@@ -20,6 +21,7 @@ log = get_logger("API")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    ensure_columns(engine)
     log.info("database tables ensured")
     await bot_manager.restart_all()
     log.info("API ready in mode=%s", settings.mode)

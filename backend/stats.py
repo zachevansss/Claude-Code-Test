@@ -28,18 +28,51 @@ def fmt_money(x: float) -> str:
 
 
 def fetch_midpoints(asset_ids: list[str]) -> dict[str, float]:
-    """Batch-fetch current midpoints from Polymarket CLOB. Returns asset_id -> price.
+    """Batch-fetch current prices from Polymarket CLOB. Returns asset_id -> price.
+
+    Tries /midpoints first (returns mid of best bid/ask for active markets).
+    For any asset_id missing from that response — typically a resolved market
+    where the orderbook has been removed — falls back to /last-trades-prices,
+    which still works after resolution and reflects the final settled price.
     Empty dict on any error so the dashboard stays usable when CLOB is down."""
     if not asset_ids:
         return {}
+    out: dict[str, float] = {}
+    body = [{"token_id": a} for a in asset_ids]
+
     try:
-        body = [{"token_id": a} for a in asset_ids]
         r = httpx.post(f"{CLOB_BASE}/midpoints", json=body, timeout=10.0)
         r.raise_for_status()
-        raw = r.json()
-        return {k: float(v) for k, v in raw.items() if v is not None}
+        for k, v in r.json().items():
+            if v is not None:
+                try:
+                    out[k] = float(v)
+                except (TypeError, ValueError):
+                    pass
     except Exception:  # noqa: BLE001
-        return {}
+        pass
+
+    missing = [a for a in asset_ids if a not in out]
+    if missing:
+        try:
+            r = httpx.post(
+                f"{CLOB_BASE}/last-trades-prices",
+                json=[{"token_id": a} for a in missing],
+                timeout=10.0,
+            )
+            r.raise_for_status()
+            for row in r.json():
+                tok = row.get("token_id")
+                price = row.get("price")
+                if tok and price is not None:
+                    try:
+                        out[tok] = float(price)
+                    except (TypeError, ValueError):
+                        pass
+        except Exception:  # noqa: BLE001
+            pass
+
+    return out
 
 
 def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = False) -> str:

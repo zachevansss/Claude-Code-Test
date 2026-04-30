@@ -103,7 +103,9 @@ def render(con: sqlite3.Connection, mode: str = "paper") -> str:
         out.append("top open markets by exposure:")
         for outcome, notional in top:
             pct = (notional / per_market_cap * 100.0) if per_market_cap else 0.0
-            bar = "#" * int(pct / 5)
+            # Bar capped at 20 chars — anything over 100% just shows full bar
+            bar_len = min(20, max(0, int(pct / 5)))
+            bar = "#" * bar_len + ("+" if pct > 100 else "")
             out.append(f"  {outcome:<28} {fmt_money(notional):>9}  {pct:>5.1f}% of cap  {bar}")
         out.append("")
 

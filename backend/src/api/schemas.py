@@ -49,6 +49,7 @@ class RiskSettingsRequest(BaseModel):
     max_exposure_per_market_pct: float | None = None
     daily_loss_cap_usd: float | None = None
     slippage_tolerance_pct: float | None = None
+    paper_balance_usd: float | None = None     # paper-mode starting bankroll
 
 
 class ModeRequest(BaseModel):

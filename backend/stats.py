@@ -16,6 +16,10 @@ import sys
 import time
 from collections import defaultdict
 
+import httpx
+
+CLOB_BASE = "https://clob.polymarket.com"
+
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "copytrade.db")
 
 
@@ -23,7 +27,22 @@ def fmt_money(x: float) -> str:
     return f"${x:,.2f}"
 
 
-def render(con: sqlite3.Connection, mode: str = "paper") -> str:
+def fetch_midpoints(asset_ids: list[str]) -> dict[str, float]:
+    """Batch-fetch current midpoints from Polymarket CLOB. Returns asset_id -> price.
+    Empty dict on any error so the dashboard stays usable when CLOB is down."""
+    if not asset_ids:
+        return {}
+    try:
+        body = [{"token_id": a} for a in asset_ids]
+        r = httpx.post(f"{CLOB_BASE}/midpoints", json=body, timeout=10.0)
+        r.raise_for_status()
+        raw = r.json()
+        return {k: float(v) for k, v in raw.items() if v is not None}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = False) -> str:
     out = []
     cur = con.cursor()
 
@@ -60,17 +79,26 @@ def render(con: sqlite3.Connection, mode: str = "paper") -> str:
     committed = 0.0
     realized = 0.0
     open_positions = 0
-    market_notional: dict[str, tuple[str, float]] = {}
-    for outcome, size, avg_price, pnl in cur.execute(
-        "SELECT outcome, size, avg_price, realized_pnl_usd"
-        " FROM positions WHERE mode = ?", (mode,)
-    ):
+    # outcome -> (outcome, notional, size, avg_price, asset_id)
+    market_data: dict[str, tuple[str, float, float, float, str | None]] = {}
+
+    # Pull each open position together with the asset_id from any matching
+    # trade row, so we can batch midpoint lookups for unrealized PnL.
+    rows = cur.execute(
+        "SELECT p.outcome, p.size, p.avg_price, p.realized_pnl_usd,"
+        " (SELECT t.asset_id FROM trades t"
+        "    WHERE t.user_id = p.user_id AND t.market_id = p.market_id"
+        "      AND t.outcome = p.outcome AND t.mode = p.mode"
+        "      AND t.asset_id IS NOT NULL LIMIT 1) AS asset_id"
+        " FROM positions p WHERE p.mode = ?", (mode,)
+    ).fetchall()
+    for outcome, size, avg_price, pnl, asset_id in rows:
         notional = size * avg_price
         committed += notional
         realized += pnl
         if size > 0:
             open_positions += 1
-            market_notional[outcome] = (outcome, notional)
+            market_data[outcome] = (outcome, notional, size, avg_price, asset_id)
 
     if mode == "paper":
         balance = max(0.0, starting - committed + realized)
@@ -91,22 +119,54 @@ def render(con: sqlite3.Connection, mode: str = "paper") -> str:
     out.append(f"avg notional:         {fmt_money(avg_notional)}  (range {fmt_money(min_notional)}-{fmt_money(max_notional)})")
     out.append(f"capital deployed:     {fmt_money(total_notional)}")
     out.append("")
+    # Fetch live midpoints in one batch and compute unrealized PnL.
+    asset_ids = [d[4] for d in market_data.values() if d[4]]
+    midpoints = fetch_midpoints(asset_ids) if not skip_prices else {}
+    unrealized = 0.0
+    market_value = 0.0
+    priced = 0
+    for _outcome, _notional, size, avg_price, asset_id in market_data.values():
+        if asset_id and asset_id in midpoints:
+            mid = midpoints[asset_id]
+            market_value += size * mid
+            unrealized += size * (mid - avg_price)
+            priced += 1
+        else:
+            # No price -> treat current value as cost basis
+            market_value += size * avg_price
+
+    total_pnl = realized + unrealized
+    pnl_pct = (total_pnl / starting * 100.0) if starting else 0.0
+
     out.append(f"available balance:    {fmt_money(balance)}")
     out.append(f"committed in open:    {fmt_money(committed)}")
+    if asset_ids and not skip_prices:
+        out.append(f"current market value: {fmt_money(market_value)}  (priced {priced}/{len(asset_ids)})")
+        out.append(f"unrealized PnL:       {fmt_money(unrealized)}")
     out.append(f"realized PnL:         {fmt_money(realized)}")
+    out.append(f"TOTAL PnL:            {fmt_money(total_pnl)}  ({pnl_pct:+.2f}% of bankroll)")
     out.append(f"open positions:       {open_positions}")
     out.append(f"runway @ avg fill:    ~{runway} more trades")
     out.append("")
 
-    top = sorted(market_notional.values(), key=lambda r: -r[1])[:8]
+    top = sorted(market_data.values(), key=lambda r: -r[1])[:8]
     if top:
-        out.append("top open markets by exposure:")
-        for outcome, notional in top:
+        out.append("top open markets (cost / mkt val / unrealized):")
+        for outcome, notional, size, avg_price, asset_id in top:
+            mid = midpoints.get(asset_id) if asset_id else None
+            if mid is not None:
+                mv = size * mid
+                upnl = size * (mid - avg_price)
+                pnl_str = f"{fmt_money(upnl):>9}"
+            else:
+                mv = notional
+                pnl_str = "    (n/a)"
             pct = (notional / per_market_cap * 100.0) if per_market_cap else 0.0
-            # Bar capped at 20 chars — anything over 100% just shows full bar
             bar_len = min(20, max(0, int(pct / 5)))
             bar = "#" * bar_len + ("+" if pct > 100 else "")
-            out.append(f"  {outcome:<28} {fmt_money(notional):>9}  {pct:>5.1f}% of cap  {bar}")
+            out.append(
+                f"  {outcome:<24} cost={fmt_money(notional):>9}  mv={fmt_money(mv):>9}  upnl={pnl_str}  {pct:>5.1f}%  {bar}"
+            )
         out.append("")
 
     last = cur.execute(
@@ -125,6 +185,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--watch", action="store_true", help="auto-refresh every 5s")
     ap.add_argument("--mode", default="paper", choices=("paper", "live"))
+    ap.add_argument("--no-prices", action="store_true",
+                    help="skip live midpoint fetch (faster, no PnL)")
     args = ap.parse_args()
 
     if not os.path.exists(DB_PATH):
@@ -133,7 +195,7 @@ def main() -> None:
 
     while True:
         with sqlite3.connect(DB_PATH) as con:
-            output = render(con, mode=args.mode)
+            output = render(con, mode=args.mode, skip_prices=args.no_prices)
         if args.watch:
             os.system("cls" if os.name == "nt" else "clear")
             print(output)

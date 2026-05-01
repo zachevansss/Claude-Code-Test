@@ -112,26 +112,28 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     committed = 0.0
     realized = 0.0
     open_positions = 0
-    # outcome -> (outcome, notional, size, avg_price, asset_id)
-    market_data: dict[str, tuple[str, float, float, float, str | None]] = {}
+    # (market_id, outcome) -> (outcome, notional, size, avg_price, asset_id)
+    # Keyed by (market_id, outcome) because outcome alone collides — many
+    # markets share generic names like "Yes" / "No" / "Over" / "Under".
+    market_data: dict[tuple[str, str], tuple[str, float, float, float, str | None]] = {}
 
-    # Pull each open position together with the asset_id from any matching
-    # trade row, so we can batch midpoint lookups for unrealized PnL.
     rows = cur.execute(
-        "SELECT p.outcome, p.size, p.avg_price, p.realized_pnl_usd,"
+        "SELECT p.market_id, p.outcome, p.size, p.avg_price, p.realized_pnl_usd,"
         " (SELECT t.asset_id FROM trades t"
         "    WHERE t.user_id = p.user_id AND t.market_id = p.market_id"
         "      AND t.outcome = p.outcome AND t.mode = p.mode"
         "      AND t.asset_id IS NOT NULL LIMIT 1) AS asset_id"
         " FROM positions p WHERE p.mode = ?", (mode,)
     ).fetchall()
-    for outcome, size, avg_price, pnl, asset_id in rows:
+    for market_id, outcome, size, avg_price, pnl, asset_id in rows:
         notional = size * avg_price
         committed += notional
         realized += pnl
         if size > 0:
             open_positions += 1
-            market_data[outcome] = (outcome, notional, size, avg_price, asset_id)
+            market_data[(market_id, outcome)] = (
+                outcome, notional, size, avg_price, asset_id, market_id,
+            )
 
     if mode == "paper":
         balance = max(0.0, starting - committed + realized)
@@ -158,7 +160,7 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     unrealized = 0.0
     market_value = 0.0
     priced = 0
-    for _outcome, _notional, size, avg_price, asset_id in market_data.values():
+    for _outcome, _notional, size, avg_price, asset_id, _mid_id in market_data.values():
         if asset_id and asset_id in midpoints:
             mid = midpoints[asset_id]
             market_value += size * mid
@@ -184,8 +186,8 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
 
     top = sorted(market_data.values(), key=lambda r: -r[1])[:8]
     if top:
-        out.append("top open markets (cost / mkt val / unrealized):")
-        for outcome, notional, size, avg_price, asset_id in top:
+        out.append("top open positions (cost / mkt val / unrealized):")
+        for outcome, notional, size, avg_price, asset_id, mid_id in top:
             mid = midpoints.get(asset_id) if asset_id else None
             if mid is not None:
                 mv = size * mid
@@ -197,8 +199,10 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
             pct = (notional / per_market_cap * 100.0) if per_market_cap else 0.0
             bar_len = min(20, max(0, int(pct / 5)))
             bar = "#" * bar_len + ("+" if pct > 100 else "")
+            # Tail of market_id disambiguates positions sharing the same outcome name.
+            label = f"{outcome} ({mid_id[-6:]})"
             out.append(
-                f"  {outcome:<24} cost={fmt_money(notional):>9}  mv={fmt_money(mv):>9}  upnl={pnl_str}  {pct:>5.1f}%  {bar}"
+                f"  {label:<32} cost={fmt_money(notional):>9}  mv={fmt_money(mv):>9}  upnl={pnl_str}  {pct:>5.1f}%  {bar}"
             )
         out.append("")
 

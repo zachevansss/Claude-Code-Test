@@ -18,6 +18,7 @@ from src.config.settings import settings
 from src.database.session import SessionLocal
 from src.executor.engine import ExecutionEngine, ExecutionRefused
 from src.models import BotInstance, ManagedWallet, Position, Trade, UserSettings, UserWallet
+from src.resolution.checker import check_resolutions
 from src.risk.manager import RiskManager, RiskRejection
 from src.simulation.engine import SimulationEngine
 from src.tracker.poller import WalletTracker
@@ -58,10 +59,16 @@ def _paper_balance(db: Session, user_id: int, starting_bankroll: float) -> float
     return max(0.0, starting_bankroll - committed + realized)
 
 
+RESOLUTION_INTERVAL_SECONDS = 60
+
+
 class BotManager:
     def __init__(self) -> None:
         self._tasks: dict[int, asyncio.Task] = {}
         self._trackers: dict[int, WalletTracker] = {}
+        # Per-user timestamp of the last resolution sweep. Throttles the
+        # checker so we don't spam Polymarket every 5-second tick.
+        self._last_resolution: dict[int, float] = {}
 
     async def start(self, user_id: int) -> None:
         existing = self._tasks.get(user_id)
@@ -141,6 +148,21 @@ class BotManager:
             )
             if not user_settings:
                 return
+
+            # Once per RESOLUTION_INTERVAL_SECONDS, sweep open positions and
+            # close any whose markets have resolved. Source wallet doesn't sell
+            # winners (they redeem on-chain), so without this our positions
+            # stay open forever and never realize PnL.
+            now = asyncio.get_event_loop().time()
+            last = self._last_resolution.get(user_id, 0.0)
+            if now - last >= RESOLUTION_INTERVAL_SECONDS:
+                self._last_resolution[user_id] = now
+                try:
+                    closed = check_resolutions(db, user_id, mode=user_settings.mode)
+                    if closed:
+                        log.info("auto-resolved %d positions for user=%s", closed, user_id)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("resolution sweep failed user=%s: %s", user_id, e)
             wallets = (
                 db.query(UserWallet)
                 .filter(UserWallet.user_id == user_id, UserWallet.is_active == True)  # noqa: E712

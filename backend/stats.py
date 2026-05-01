@@ -220,7 +220,17 @@ def main() -> None:
     ap.add_argument("--mode", default="paper", choices=("paper", "live"))
     ap.add_argument("--no-prices", action="store_true",
                     help="skip live midpoint fetch (faster, no PnL)")
+    ap.add_argument("--resolve", action="store_true",
+                    help="run resolution sweep before snapshot")
     args = ap.parse_args()
+
+    if args.resolve:
+        # One-shot sweep using the SQLAlchemy session.
+        from src.database.session import SessionLocal
+        from src.resolution.checker import check_resolutions
+        with SessionLocal() as db:
+            n = check_resolutions(db, user_id=1, mode=args.mode)
+        print(f"resolved {n} position(s)\n")
 
     if not os.path.exists(DB_PATH):
         print(f"db not found at {DB_PATH}")

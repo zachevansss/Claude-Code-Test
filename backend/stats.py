@@ -15,6 +15,7 @@ import sqlite3
 import sys
 import time
 from collections import defaultdict
+from datetime import date
 
 import httpx
 
@@ -25,6 +26,60 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "copytrade.db
 
 def fmt_money(x: float) -> str:
     return f"${x:,.2f}"
+
+
+def compute_daily_pnl(con: sqlite3.Connection, mode: str) -> dict[date, dict]:
+    """Replay trades chronologically and bucket realized PnL by calendar day.
+
+    Avg-price isn't stored on Trade rows, so we have to reconstruct it by
+    walking buys/sells in order. Linear in number of trades — fine at our
+    scale, won't be once trade volume gets big.
+
+    Returns: {date: {realized, buys, sells, volume_buys, volume_sells}}"""
+    positions: dict[tuple[str, str], dict] = defaultdict(
+        lambda: {"size": 0.0, "avg_price": 0.0}
+    )
+    daily: dict[date, dict] = defaultdict(
+        lambda: {
+            "realized": 0.0,
+            "buys": 0,
+            "sells": 0,
+            "volume_buys": 0.0,
+            "volume_sells": 0.0,
+        }
+    )
+
+    rows = con.execute(
+        "SELECT created_at, market_id, outcome, side, price, size, notional_usd"
+        " FROM trades WHERE mode = ? ORDER BY id ASC",
+        (mode,),
+    ).fetchall()
+
+    for ts, market_id, outcome, side, price, size, notional in rows:
+        try:
+            day = date.fromisoformat(ts[:10])
+        except (TypeError, ValueError):
+            continue
+        pos = positions[(market_id, outcome)]
+        bucket = daily[day]
+        if side == "buy":
+            new_size = pos["size"] + size
+            if new_size > 0:
+                pos["avg_price"] = (
+                    pos["avg_price"] * pos["size"] + price * size
+                ) / new_size
+            pos["size"] = new_size
+            bucket["buys"] += 1
+            bucket["volume_buys"] += notional
+        else:  # sell
+            close_size = min(pos["size"], size)
+            pnl = (price - pos["avg_price"]) * close_size
+            bucket["realized"] += pnl
+            bucket["sells"] += 1
+            bucket["volume_sells"] += notional
+            pos["size"] = max(0.0, pos["size"] - size)
+
+    return daily
 
 
 def fetch_midpoints(asset_ids: list[str]) -> dict[str, float]:
@@ -183,6 +238,20 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     out.append(f"open positions:       {open_positions}")
     out.append(f"runway @ avg fill:    ~{runway} more trades")
     out.append("")
+
+    # Realized PnL bucketed by calendar day. Most-recent day first.
+    daily = compute_daily_pnl(con, mode)
+    if daily:
+        out.append("realized PnL by day (most recent first):")
+        for day in sorted(daily.keys(), reverse=True)[:14]:
+            d = daily[day]
+            sign = "+" if d["realized"] >= 0 else "-"
+            out.append(
+                f"  {day.isoformat()}  {sign}{fmt_money(abs(d['realized'])):>9}  "
+                f"buys={d['buys']:>4} ({fmt_money(d['volume_buys']):>9})  "
+                f"sells={d['sells']:>4} ({fmt_money(d['volume_sells']):>9})"
+            )
+        out.append("")
 
     top = sorted(market_data.values(), key=lambda r: -r[1])[:8]
     if top:

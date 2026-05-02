@@ -266,12 +266,9 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
                 mv = notional
                 pnl_str = "    (n/a)"
             pct = (notional / per_market_cap * 100.0) if per_market_cap else 0.0
-            bar_len = min(20, max(0, int(pct / 5)))
-            bar = "#" * bar_len + ("+" if pct > 100 else "")
-            # Tail of market_id disambiguates positions sharing the same outcome name.
             label = f"{outcome} ({mid_id[-6:]})"
             out.append(
-                f"  {label:<32} cost={fmt_money(notional):>9}  mv={fmt_money(mv):>9}  upnl={pnl_str}  {pct:>5.1f}%  {bar}"
+                f"  {label:<32} cost={fmt_money(notional):>9}  mv={fmt_money(mv):>9}  upnl={pnl_str}  {pct:>5.1f}% of cap"
             )
         out.append("")
 

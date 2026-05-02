@@ -25,6 +25,13 @@ class UserSettings(Base):
     # below which signals are skipped rather than boosted.
     mirror_scale: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
     min_trade_usd: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    # Curve power for mirror sizing: notional = scale × source_notional^power.
+    # 1.0 = linear (default, preserves existing behavior).
+    # 0.5 = square-root (sub-linear: big source bets get smaller multiplier).
+    # 0.3 = aggressive compression (very flat curve at large bet sizes).
+    # Useful when source bankroll dwarfs yours — keeps a single $10K source
+    # bet from hogging your leverage budget at the per-trade cap.
+    mirror_power: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
 
     # Risk caps
     max_percent_per_trade: Mapped[float] = mapped_column(Float, default=5.0, nullable=False)

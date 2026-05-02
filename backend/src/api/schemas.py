@@ -44,6 +44,7 @@ class RiskSettingsRequest(BaseModel):
     sizing_percent: float | None = None
     sizing_fixed_usd: float | None = None
     mirror_scale: float | None = None        # multiplier on source notional (mirror only)
+    mirror_power: float | None = None        # curve exponent: 1.0=linear, 0.5=sqrt, <1.0=diminishing
     min_trade_usd: float | None = None       # floor; signals below this are skipped (mirror only)
     max_percent_per_trade: float | None = None
     max_exposure_per_market_pct: float | None = None
@@ -64,6 +65,7 @@ class SettingsOut(BaseModel):
     sizing_percent: float
     sizing_fixed_usd: float
     mirror_scale: float
+    mirror_power: float
     min_trade_usd: float
     max_percent_per_trade: float
     max_exposure_per_market_pct: float

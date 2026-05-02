@@ -91,7 +91,15 @@ class RiskManager:
         elif strategy == "fixed":
             notional = self.settings.sizing_fixed_usd
         elif strategy == "mirror":
-            notional = source_notional * self.settings.mirror_scale
+            power = self.settings.mirror_power
+            scale = self.settings.mirror_scale
+            if power == 1.0:
+                notional = source_notional * scale
+            else:
+                # Sub-linear: notional = scale × source^power.
+                # Big source bets compress under the curve so a single huge
+                # signal can't hog the leverage budget at the per-trade cap.
+                notional = scale * (source_notional ** power)
             min_floor = self.settings.min_trade_usd
             if notional < min_floor:
                 raise RiskRejection(

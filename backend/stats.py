@@ -135,7 +135,7 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     cur = con.cursor()
 
     settings = cur.execute(
-        "SELECT mode, sizing_strategy, mirror_scale, min_trade_usd,"
+        "SELECT mode, sizing_strategy, mirror_scale, mirror_power, min_trade_usd,"
         " max_percent_per_trade, max_exposure_per_market_pct,"
         " max_total_leverage_pct, daily_loss_cap_pct, paper_balance_usd"
         " FROM user_settings"
@@ -143,7 +143,7 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     if not settings:
         return "(no user_settings rows — sign up first)"
     (
-        run_mode, strategy, mirror_scale, min_trade,
+        run_mode, strategy, mirror_scale, mirror_power, min_trade,
         per_trade_pct, per_market_pct, max_leverage_pct,
         daily_loss_pct, starting,
     ) = settings
@@ -202,7 +202,8 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
 
     out.append(f"=== {run_mode.upper()} STATS ===")
     out.append(f"bot status:           {bot_status}")
-    out.append(f"strategy:             {strategy}  (mirrorx{mirror_scale}  min ${min_trade:.2f})")
+    curve_note = "" if mirror_power == 1.0 else f"  power={mirror_power}"
+    out.append(f"strategy:             {strategy}  (mirrorx{mirror_scale}  min ${min_trade:.2f}{curve_note})")
     out.append(f"per-trade cap:        {per_trade_pct:.2f}% = {fmt_money(per_trade_cap)}")
     out.append(f"per-market cap:       {per_market_pct:.2f}% = {fmt_money(per_market_cap)}")
     account_value = balance + committed

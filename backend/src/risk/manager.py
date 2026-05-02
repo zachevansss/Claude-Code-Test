@@ -67,6 +67,19 @@ class RiskManager:
                 f"{self.settings.daily_loss_cap_pct:.1f}% of account)"
             )
 
+        # Total portfolio leverage cap. Rejects any new order once the sum
+        # of open-position cost exceeds X% of account value. Source's
+        # high-frequency activity can otherwise stack hundreds of $1.50
+        # fills on a small bankroll into 60-90% deployment.
+        total_committed = sum(self.exposure_by_market_usd.values())
+        leverage_cap = self.account_value_usd * (self.settings.max_total_leverage_pct / 100.0)
+        if total_committed >= leverage_cap:
+            raise RiskRejection(
+                f"total leverage cap reached "
+                f"({total_committed:.2f} >= {leverage_cap:.2f}, "
+                f"{self.settings.max_total_leverage_pct:.1f}% of account)"
+            )
+
         if signal.price <= 0:
             raise RiskRejection(f"non-positive signal price: {signal.price}")
         source_notional = signal.price * signal.size

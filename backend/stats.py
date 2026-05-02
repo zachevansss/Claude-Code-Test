@@ -137,13 +137,15 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     settings = cur.execute(
         "SELECT mode, sizing_strategy, mirror_scale, min_trade_usd,"
         " max_percent_per_trade, max_exposure_per_market_pct,"
-        " daily_loss_cap_pct, paper_balance_usd FROM user_settings"
+        " max_total_leverage_pct, daily_loss_cap_pct, paper_balance_usd"
+        " FROM user_settings"
     ).fetchone()
     if not settings:
         return "(no user_settings rows — sign up first)"
     (
         run_mode, strategy, mirror_scale, min_trade,
-        per_trade_pct, per_market_pct, daily_loss_pct, starting,
+        per_trade_pct, per_market_pct, max_leverage_pct,
+        daily_loss_pct, starting,
     ) = settings
 
     bot = cur.execute(
@@ -203,9 +205,13 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     out.append(f"strategy:             {strategy}  (mirrorx{mirror_scale}  min ${min_trade:.2f})")
     out.append(f"per-trade cap:        {per_trade_pct:.2f}% = {fmt_money(per_trade_cap)}")
     out.append(f"per-market cap:       {per_market_pct:.2f}% = {fmt_money(per_market_cap)}")
-    # Daily loss cap scales with account value (cash + open position cost),
-    # not just available cash, so committing capital doesn't squeeze the cap.
     account_value = balance + committed
+    max_leverage_dollars = account_value * (max_leverage_pct / 100.0)
+    current_leverage_pct = (committed / account_value * 100.0) if account_value else 0.0
+    out.append(
+        f"total leverage cap:   {max_leverage_pct:.1f}% = {fmt_money(max_leverage_dollars)}"
+        f"  (now: {current_leverage_pct:.1f}%)"
+    )
     daily_loss_cap_dollars = account_value * (daily_loss_pct / 100.0)
     out.append(f"daily loss cap:       {daily_loss_pct:.1f}% = {fmt_money(daily_loss_cap_dollars)}  (of acct value)")
     out.append("")

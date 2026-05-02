@@ -47,6 +47,7 @@ class RiskSettingsRequest(BaseModel):
     min_trade_usd: float | None = None       # floor; signals below this are skipped (mirror only)
     max_percent_per_trade: float | None = None
     max_exposure_per_market_pct: float | None = None
+    max_total_leverage_pct: float | None = None  # max % of account in open positions
     daily_loss_cap_pct: float | None = None    # halt at this % drawdown of current balance
     daily_loss_cap_usd: float | None = None    # legacy; superseded by daily_loss_cap_pct
     slippage_tolerance_pct: float | None = None
@@ -66,6 +67,7 @@ class SettingsOut(BaseModel):
     min_trade_usd: float
     max_percent_per_trade: float
     max_exposure_per_market_pct: float
+    max_total_leverage_pct: float
     daily_loss_cap_pct: float
     daily_loss_cap_usd: float       # legacy; ignored when daily_loss_cap_pct is in use
     slippage_tolerance_pct: float

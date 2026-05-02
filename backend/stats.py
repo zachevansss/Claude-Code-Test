@@ -137,13 +137,13 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     settings = cur.execute(
         "SELECT mode, sizing_strategy, mirror_scale, min_trade_usd,"
         " max_percent_per_trade, max_exposure_per_market_pct,"
-        " daily_loss_cap_usd, paper_balance_usd FROM user_settings"
+        " daily_loss_cap_pct, paper_balance_usd FROM user_settings"
     ).fetchone()
     if not settings:
         return "(no user_settings rows — sign up first)"
     (
         run_mode, strategy, mirror_scale, min_trade,
-        per_trade_pct, per_market_pct, daily_loss_cap, starting,
+        per_trade_pct, per_market_pct, daily_loss_pct, starting,
     ) = settings
 
     bot = cur.execute(
@@ -203,7 +203,11 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     out.append(f"strategy:             {strategy}  (mirrorx{mirror_scale}  min ${min_trade:.2f})")
     out.append(f"per-trade cap:        {per_trade_pct:.2f}% = {fmt_money(per_trade_cap)}")
     out.append(f"per-market cap:       {per_market_pct:.2f}% = {fmt_money(per_market_cap)}")
-    out.append(f"daily loss cap:       {fmt_money(daily_loss_cap)}")
+    # Daily loss cap scales with account value (cash + open position cost),
+    # not just available cash, so committing capital doesn't squeeze the cap.
+    account_value = balance + committed
+    daily_loss_cap_dollars = account_value * (daily_loss_pct / 100.0)
+    out.append(f"daily loss cap:       {daily_loss_pct:.1f}% = {fmt_money(daily_loss_cap_dollars)}  (of acct value)")
     out.append("")
     out.append(f"fills:                {n_fills}  ({n_buys} buys, {n_sells} sells)")
     out.append(f"avg notional:         {fmt_money(avg_notional)}  (range {fmt_money(min_notional)}-{fmt_money(max_notional)})")

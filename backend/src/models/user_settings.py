@@ -32,6 +32,14 @@ class UserSettings(Base):
     # falls with bankroll. e.g. 10.0 = no single market may hold more than 10%
     # of available capital at any time.
     max_exposure_per_market_pct: Mapped[float] = mapped_column(Float, default=10.0, nullable=False)
+    # Daily loss cap as a % of current balance. e.g. 10.0 = halt the bot for
+    # the day once realized losses exceed 10% of available capital. Scales
+    # with the bankroll, so the dollar threshold rises as you win and drops
+    # as you lose (extra-conservative behavior on the way down).
+    daily_loss_cap_pct: Mapped[float] = mapped_column(Float, default=10.0, nullable=False)
+    # Legacy fixed-USD daily cap. Kept for backwards-compat in DB rows; risk
+    # manager uses daily_loss_cap_pct instead. Will be removed once all
+    # deployments are migrated.
     daily_loss_cap_usd: Mapped[float] = mapped_column(Float, default=50.0, nullable=False)
 
     # Execution

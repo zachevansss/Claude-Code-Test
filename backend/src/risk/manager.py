@@ -45,18 +45,26 @@ class RiskManager:
         balance_usd: float,
         exposure_by_market_usd: dict[str, float],
         daily_loss_usd: float,
+        account_value_usd: float | None = None,
     ) -> None:
         self.settings = settings
         self.balance_usd = balance_usd
         self.exposure_by_market_usd = exposure_by_market_usd
         self.daily_loss_usd = daily_loss_usd
+        # Total account value (cash + cost basis of open positions). Used as
+        # the baseline for daily-loss-cap %. If not provided, falls back to
+        # balance_usd for backwards compat.
+        self.account_value_usd = account_value_usd if account_value_usd is not None else balance_usd
 
     def size(self, signal: TradeSignal) -> SizedOrder:
-        # Daily loss cap — short-circuit before any sizing math.
-        if self.daily_loss_usd >= self.settings.daily_loss_cap_usd:
+        # Daily loss cap as a % of total account value (not just available
+        # cash) — scales up when you've banked profits, down after losses.
+        daily_loss_cap = self.account_value_usd * (self.settings.daily_loss_cap_pct / 100.0)
+        if self.daily_loss_usd >= daily_loss_cap:
             raise RiskRejection(
                 f"daily loss cap reached "
-                f"({self.daily_loss_usd:.2f} >= {self.settings.daily_loss_cap_usd:.2f})"
+                f"({self.daily_loss_usd:.2f} >= {daily_loss_cap:.2f}, "
+                f"{self.settings.daily_loss_cap_pct:.1f}% of account)"
             )
 
         if signal.price <= 0:

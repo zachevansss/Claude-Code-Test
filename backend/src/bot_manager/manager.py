@@ -281,7 +281,12 @@ class BotManager:
             )
             daily_loss = max(0.0, -todays_realized)
 
-            risk = RiskManager(user_settings, balance, exposure, daily_loss)
+            # account_value = available cash + cost basis of open positions.
+            # For paper that's just starting_bankroll + total_realized.
+            # For live we approximate with balance (USDC) + in-flight + position
+            # cost basis (already summed via exposure dict).
+            account_value = balance + sum(exposure.values())
+            risk = RiskManager(user_settings, balance, exposure, daily_loss, account_value)
             if user_settings.mode == "paper":
                 engine: SimulationEngine | ExecutionEngine = SimulationEngine(db, user_id)
             else:

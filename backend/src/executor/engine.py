@@ -148,6 +148,7 @@ class ExecutionEngine:
             market_id=order.market_id,
             asset_id=order.asset_id,
             outcome=order.outcome,
+            title=order.title,
             side=order.side,
             price=limit,            # the price we actually offered, not the source price
             size=order.size,

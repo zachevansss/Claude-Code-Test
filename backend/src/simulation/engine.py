@@ -23,6 +23,7 @@ class SimulationEngine:
             market_id=order.market_id,
             asset_id=order.asset_id,
             outcome=order.outcome,
+            title=order.title,
             side=order.side,
             price=order.price,
             size=order.size,

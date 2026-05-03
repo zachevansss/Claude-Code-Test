@@ -17,6 +17,9 @@ class Trade(Base):
     market_id: Mapped[str] = mapped_column(String(128), nullable=False)
     asset_id: Mapped[str | None] = mapped_column(String(128), nullable=True)  # ERC-1155 token id
     outcome: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Human-readable market question / title from source activity row.
+    # e.g. "Will Fukushima United FC win on 2026-05-03?"
+    title: Mapped[str | None] = mapped_column(String(256), nullable=True)
     side: Mapped[str] = mapped_column(String(8), nullable=False)  # "buy" | "sell"
     price: Mapped[float] = mapped_column(Float, nullable=False)
     size: Mapped[float] = mapped_column(Float, nullable=False)

@@ -141,12 +141,26 @@ def check_resolutions(db: Session, user_id: int, mode: str = "paper") -> int:
         realized_delta = (last - avg) * size
         notional = last * size
 
+        # Carry the market title forward from any prior trade row so the
+        # resolution sell shows a meaningful name in the dashboard.
+        title_row = (
+            db.query(Trade.title)
+            .filter(
+                Trade.user_id == user_id,
+                Trade.market_id == pos.market_id,
+                Trade.outcome == pos.outcome,
+                Trade.mode == mode,
+                Trade.title.isnot(None),
+            )
+            .first()
+        )
         synth = Trade(
             user_id=user_id,
             source_wallet="resolution",
             market_id=pos.market_id,
             asset_id=asset,
             outcome=pos.outcome,
+            title=title_row[0] if title_row else None,
             side="sell",
             price=last,
             size=size,

@@ -17,6 +17,7 @@ class TradeSignal:
     size: float             # source-wallet size (units, not USD)
     external_tx: str | None = None   # source-wallet tx hash; used for dedupe
     asset_id: str | None = None      # ERC-1155 token id; CLOB orders need this
+    title: str | None = None         # human-readable market title
 
 
 @dataclass
@@ -30,6 +31,7 @@ class SizedOrder:
     notional_usd: float
     external_tx: str | None = None
     asset_id: str | None = None
+    title: str | None = None
 
 
 class RiskRejection(Exception):
@@ -137,4 +139,5 @@ class RiskManager:
             notional_usd=notional,
             external_tx=signal.external_tx,
             asset_id=signal.asset_id,
+            title=signal.title,
         )

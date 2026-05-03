@@ -115,6 +115,7 @@ class WalletTracker:
             if not market_id or price <= 0 or size <= 0:
                 return None
             asset_id = a.get("asset")
+            title = a.get("title")
             return TradeSignal(
                 source_wallet=source_wallet,
                 market_id=str(market_id),
@@ -124,6 +125,7 @@ class WalletTracker:
                 size=size,
                 external_tx=a.get("transactionHash"),
                 asset_id=str(asset_id) if asset_id is not None else None,
+                title=str(title) if title is not None else None,
             )
         except (TypeError, ValueError) as e:
             log.warning("failed to parse activity row: %s (raw=%s)", e, a)

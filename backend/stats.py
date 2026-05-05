@@ -23,9 +23,62 @@ CLOB_BASE = "https://clob.polymarket.com"
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "copytrade.db")
 
+# ANSI color helpers. Disabled by setting COLORS to a no-op dict via --no-color.
+# On Windows 10+ Terminal/PowerShell renders these natively; older shells may
+# need _enable_vt_mode() below.
+COLORS = {
+    "reset":  "\033[0m",
+    "dim":    "\033[2m",
+    "bold":   "\033[1m",
+    "green":  "\033[32m",
+    "red":    "\033[31m",
+    "cyan":   "\033[36m",
+    "yellow": "\033[33m",
+    "gray":   "\033[90m",
+    "bgreen": "\033[1;32m",
+    "bred":   "\033[1;31m",
+}
+
+
+def _enable_vt_mode() -> None:
+    """Best-effort enable of ANSI VT processing on legacy Windows consoles."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        kernel = ctypes.windll.kernel32
+        h = kernel.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_ulong()
+        kernel.GetConsoleMode(h, ctypes.byref(mode))
+        kernel.SetConsoleMode(h, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def c(name: str) -> str:
+    return COLORS.get(name, "")
+
 
 def fmt_money(x: float) -> str:
     return f"${x:,.2f}"
+
+
+def fmt_pnl(x: float, width: int = 10) -> str:
+    """Color-coded PnL: green for positive (with +), red for negative, dim for zero."""
+    if x > 0:
+        s = f"+{fmt_money(x)}"
+        return f"{c('green')}{s:>{width}}{c('reset')}"
+    if x < 0:
+        s = f"-{fmt_money(abs(x))}"
+        return f"{c('red')}{s:>{width}}{c('reset')}"
+    return f"{c('dim')}{fmt_money(0):>{width}}{c('reset')}"
+
+
+def heading(label: str, width: int = 68) -> str:
+    """Section header with horizontal rule."""
+    inner = f" {label.upper()} "
+    pad = width - len(inner) - 4
+    return f"{c('cyan')}─── {inner}{'─' * max(pad, 0)}{c('reset')}"
 
 
 def _utc_iso_to_local_date(ts: str) -> date | None:
@@ -224,26 +277,6 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     per_market_cap = balance * (per_market_pct / 100.0)
     runway = int(balance / max(avg_notional, 0.5)) if avg_notional > 0 else 0
 
-    out.append(f"=== {run_mode.upper()} STATS ===")
-    out.append(f"bot status:           {bot_status}")
-    curve_note = "" if mirror_power == 1.0 else f"  power={mirror_power}"
-    out.append(f"strategy:             {strategy}  (mirrorx{mirror_scale}  min ${min_trade:.2f}{curve_note})")
-    out.append(f"per-trade cap:        {per_trade_pct:.2f}% = {fmt_money(per_trade_cap)}")
-    out.append(f"per-market cap:       {per_market_pct:.2f}% = {fmt_money(per_market_cap)}")
-    account_value = balance + committed
-    max_leverage_dollars = account_value * (max_leverage_pct / 100.0)
-    current_leverage_pct = (committed / account_value * 100.0) if account_value else 0.0
-    out.append(
-        f"total leverage cap:   {max_leverage_pct:.1f}% = {fmt_money(max_leverage_dollars)}"
-        f"  (now: {current_leverage_pct:.1f}%)"
-    )
-    daily_loss_cap_dollars = account_value * (daily_loss_pct / 100.0)
-    out.append(f"daily loss cap:       {daily_loss_pct:.1f}% = {fmt_money(daily_loss_cap_dollars)}  (of acct value)")
-    out.append("")
-    out.append(f"fills:                {n_fills}  ({n_buys} buys, {n_sells} sells)")
-    out.append(f"avg notional:         {fmt_money(avg_notional)}  (range {fmt_money(min_notional)}-{fmt_money(max_notional)})")
-    out.append(f"capital deployed:     {fmt_money(total_notional)}")
-    out.append("")
     # Fetch live midpoints in one batch and compute unrealized PnL.
     asset_ids = [d[4] for d in market_data.values() if d[4]]
     midpoints = fetch_midpoints(asset_ids) if not skip_prices else {}
@@ -257,58 +290,78 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
             unrealized += size * (mid - avg_price)
             priced += 1
         else:
-            # No price -> treat current value as cost basis
             market_value += size * avg_price
 
     total_pnl = realized + unrealized
     pnl_pct = (total_pnl / starting * 100.0) if starting else 0.0
+    account_value = balance + committed
+    max_leverage_dollars = account_value * (max_leverage_pct / 100.0)
+    current_leverage_pct = (committed / account_value * 100.0) if account_value else 0.0
+    daily_loss_cap_dollars = account_value * (daily_loss_pct / 100.0)
 
-    out.append(f"available balance:    {fmt_money(balance)}")
-    out.append(f"committed in open:    {fmt_money(committed)}")
-    if asset_ids and not skip_prices:
-        out.append(f"current market value: {fmt_money(market_value)}  (priced {priced}/{len(asset_ids)})")
-        out.append(f"unrealized PnL:       {fmt_money(unrealized)}")
-    out.append(f"realized PnL:         {fmt_money(realized)}")
-    out.append(f"TOTAL PnL:            {fmt_money(total_pnl)}  ({pnl_pct:+.2f}% of bankroll)")
-    out.append(f"open positions:       {open_positions}")
-    out.append(f"runway @ avg fill:    ~{runway} more trades")
+    # ──────────────────────────── BANNER ────────────────────────────
+    status_color = "green" if bot_status == "running" else "yellow"
+    out.append(f"{c('bold')}{c('cyan')}═══ POLYMARKET COPY-TRADE BOT ═══{c('reset')}  "
+               f"{c('dim')}{run_mode.upper()}{c('reset')}  "
+               f"{c(status_color)}● {bot_status.upper()}{c('reset')}")
     out.append("")
 
-    # Realized PnL bucketed by calendar day. Most-recent day first.
+    # ──────────────────────────── ACCOUNT ────────────────────────────
+    out.append(heading("account"))
+    out.append(f"  {c('bold')}Total P&L{c('reset')}            "
+               f"{fmt_pnl(total_pnl)}   "
+               f"{c('green' if pnl_pct >= 0 else 'red')}{pnl_pct:+.2f}%{c('reset')}")
+    out.append(f"  {c('dim')}  realized{c('reset')}             {fmt_pnl(realized)}")
+    if asset_ids and not skip_prices:
+        out.append(f"  {c('dim')}  unrealized{c('reset')}           {fmt_pnl(unrealized)}  "
+                   f"{c('dim')}({priced}/{len(asset_ids)} priced){c('reset')}")
+    out.append("")
+    out.append(f"  Account Value         {c('bold')}{fmt_money(account_value):>11}{c('reset')}  "
+               f"{c('dim')}(started {fmt_money(starting)}){c('reset')}")
+    out.append(f"  Available Cash        {fmt_money(balance):>11}")
+    out.append(f"  Committed             {fmt_money(committed):>11}  "
+               f"{c('dim')}({open_positions} open positions){c('reset')}")
+    if asset_ids and not skip_prices:
+        out.append(f"  Open Market Value     {fmt_money(market_value):>11}")
+    out.append("")
+
+    # ──────────────────────────── RISK CAPS ────────────────────────────
+    out.append(heading("risk caps"))
+    lev_color = "yellow" if current_leverage_pct > max_leverage_pct * 0.7 else "green"
+    out.append(f"  Per-Trade           {per_trade_pct:>5.1f}%   "
+               f"{fmt_money(per_trade_cap):>10}")
+    pmkt_str = "off" if per_market_pct >= 100 else fmt_money(per_market_cap)
+    out.append(f"  Per-Market          {per_market_pct:>5.1f}%   {pmkt_str:>10}")
+    out.append(f"  Total Leverage      {max_leverage_pct:>5.1f}%   "
+               f"{fmt_money(max_leverage_dollars):>10}   "
+               f"{c(lev_color)}{current_leverage_pct:>4.1f}% used{c('reset')}")
+    out.append(f"  Daily Loss          {daily_loss_pct:>5.1f}%   "
+               f"{fmt_money(daily_loss_cap_dollars):>10}")
+    out.append("")
+
+    # ──────────────────────────── STRATEGY ────────────────────────────
+    out.append(heading("strategy"))
+    curve_note = "" if mirror_power == 1.0 else f" ^ {mirror_power}"
+    out.append(f"  {strategy}  x{mirror_scale}{curve_note}   "
+               f"{c('dim')}min trade{c('reset')} {fmt_money(min_trade)}")
+    out.append(f"  {c('dim')}{n_fills} fills total · avg {fmt_money(avg_notional)}"
+               f"  ({n_buys} buys / {n_sells} sells){c('reset')}")
+    out.append("")
+
+    # ──────────────────────────── DAILY P&L ────────────────────────────
     daily = compute_daily_pnl(con, mode)
     if daily:
-        out.append("realized PnL by day (most recent first):")
+        out.append(heading("daily p&l"))
         for day in sorted(daily.keys(), reverse=True)[:14]:
             d = daily[day]
-            sign = "+" if d["realized"] >= 0 else "-"
             out.append(
-                f"  {day.isoformat()}  {sign}{fmt_money(abs(d['realized'])):>9}  "
-                f"buys={d['buys']:>4} ({fmt_money(d['volume_buys']):>9})  "
-                f"sells={d['sells']:>4} ({fmt_money(d['volume_sells']):>9})"
+                f"  {day.isoformat()}   {fmt_pnl(d['realized'])}   "
+                f"{c('dim')}{d['buys']:>4} buys / {d['sells']:>3} sells"
+                f"  ({fmt_money(d['volume_buys'])} / {fmt_money(d['volume_sells'])}){c('reset')}"
             )
         out.append("")
 
-    top = sorted(market_data.values(), key=lambda r: -r[1])[:8]
-    if top:
-        out.append("top open positions:")
-        for outcome, notional, size, avg_price, asset_id, mid_id, title in top:
-            mid = midpoints.get(asset_id) if asset_id else None
-            if mid is not None:
-                mv = size * mid
-                upnl = size * (mid - avg_price)
-                pnl_str = f"{fmt_money(upnl):>9}"
-            else:
-                mv = notional
-                pnl_str = "    (n/a)"
-            pct = (notional / per_market_cap * 100.0) if per_market_cap else 0.0
-            header = title[:70] if title else f"({mid_id[-8:]})"
-            out.append(f"  {header}")
-            out.append(
-                f"     side: {outcome:<22} cost={fmt_money(notional):>8}  mv={fmt_money(mv):>8}  upnl={pnl_str}  {pct:>4.1f}%"
-            )
-        out.append("")
-
-    # Win rate on resolved positions only (size == 0 + non-zero realized).
+    # ──────────────────────────── PERFORMANCE ────────────────────────────
     closed = cur.execute(
         "SELECT realized_pnl_usd FROM positions"
         " WHERE mode = ? AND size = 0 AND realized_pnl_usd != 0",
@@ -321,14 +374,39 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     avg_win = (sum(r[0] for r in closed if r[0] > 0) / wins) if wins else 0.0
     avg_loss = (sum(r[0] for r in closed if r[0] < 0) / losses) if losses else 0.0
     if total_closed:
-        out.append(
-            f"closed positions:     {total_closed}  ({wins} wins / {losses} losses)  "
-            f"win rate {win_rate:.1f}%  avg win {fmt_money(avg_win)}  avg loss {fmt_money(avg_loss)}"
-        )
+        out.append(heading("performance"))
+        wr_color = "green" if win_rate >= 60 else "yellow" if win_rate >= 50 else "red"
+        out.append(f"  Closed Positions      {total_closed}")
+        out.append(f"  Win Rate              {c(wr_color)}{c('bold')}{win_rate:>5.1f}%{c('reset')}  "
+                   f"{c('dim')}({c('green')}{wins} wins{c('reset')}{c('dim')} / "
+                   f"{c('red')}{losses} losses{c('reset')}{c('dim')}){c('reset')}")
+        out.append(f"  Avg Win               {fmt_pnl(avg_win)}")
+        out.append(f"  Avg Loss              {fmt_pnl(avg_loss)}")
         out.append("")
 
-    # Top winners + top losers among closed positions, joined to a trade row
-    # for the title.
+    # ──────────────────────────── TOP OPEN POSITIONS ────────────────────────────
+    top = sorted(market_data.values(), key=lambda r: -r[1])[:8]
+    if top:
+        out.append(heading("top open positions"))
+        for outcome, notional, size, avg_price, asset_id, mid_id, title in top:
+            mid = midpoints.get(asset_id) if asset_id else None
+            if mid is not None:
+                mv = size * mid
+                upnl = size * (mid - avg_price)
+                pnl_part = fmt_pnl(upnl, width=10)
+            else:
+                mv = notional
+                pnl_part = f"{c('dim')}     n/a{c('reset')}"
+            header = (title[:66] + "…") if title and len(title) > 66 else (title or f"({mid_id[-8:]})")
+            out.append(f"  {c('bold')}{header}{c('reset')}")
+            out.append(
+                f"      {outcome:<22} {c('dim')}cost{c('reset')} {fmt_money(notional):>7}  "
+                f"{c('dim')}mv{c('reset')} {fmt_money(mv):>7}  "
+                f"{c('dim')}upnl{c('reset')} {pnl_part}"
+            )
+        out.append("")
+
+    # ──────────────────────────── BIGGEST WINNERS / LOSERS ────────────────────────────
     winners = cur.execute(
         "SELECT p.outcome, p.realized_pnl_usd,"
         " (SELECT t.title FROM trades t WHERE t.user_id=p.user_id"
@@ -348,19 +426,19 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
         (mode,),
     ).fetchall()
     if winners:
-        out.append("top 5 winners (realized):")
+        out.append(heading("biggest winners"))
         for outcome, pnl, title in winners:
-            label = (title or "(unknown market)")[:60]
-            out.append(f"  +{fmt_money(pnl):>8}  {outcome:<20}  {label}")
+            label = (title or "(unknown)")[:55]
+            out.append(f"  {fmt_pnl(pnl, width=9)}   {outcome:<20}  {c('dim')}{label}{c('reset')}")
         out.append("")
     if losers:
-        out.append("top 5 losers (realized):")
+        out.append(heading("biggest losers"))
         for outcome, pnl, title in losers:
-            label = (title or "(unknown market)")[:60]
-            out.append(f"   {fmt_money(pnl):>8}  {outcome:<20}  {label}")
+            label = (title or "(unknown)")[:55]
+            out.append(f"  {fmt_pnl(pnl, width=9)}   {outcome:<20}  {c('dim')}{label}{c('reset')}")
         out.append("")
 
-    # Recent resolutions feed — synthetic resolution sells from the auto-checker.
+    # ──────────────────────────── RECENT RESOLUTIONS ────────────────────────────
     resolutions = cur.execute(
         "SELECT t.created_at, t.outcome, t.title, t.price, t.size,"
         " (SELECT p.realized_pnl_usd FROM positions p"
@@ -371,16 +449,18 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
         (mode,),
     ).fetchall()
     if resolutions:
-        out.append("recent resolutions (auto-closed by resolver):")
+        out.append(heading("recent resolutions"))
         for ts, outcome, title, price, size, pnl in resolutions:
-            won = "WON " if (price is not None and price > 0.5) else "LOST"
-            label = (title or "(unknown market)")[:55]
-            pnl_str = f"{fmt_money(pnl):>8}" if pnl is not None else "    n/a"
-            out.append(
-                f"  {_utc_iso_to_local_str(ts)}  {won}  {outcome:<18}  {pnl_str}  {label}"
-            )
+            won = price is not None and price > 0.5
+            tag = f"{c('green')}WON {c('reset')}" if won else f"{c('red')}LOST{c('reset')}"
+            label = (title or "(unknown)")[:50]
+            pnl_part = fmt_pnl(pnl, width=9) if pnl is not None else f"{c('dim')}      n/a{c('reset')}"
+            short_ts = _utc_iso_to_local_str(ts)[5:16]  # MM-DD HH:MM
+            out.append(f"  {c('dim')}{short_ts}{c('reset')}  {tag}  {pnl_part}   "
+                       f"{outcome:<18} {c('dim')}{label}{c('reset')}")
         out.append("")
 
+    # ──────────────────────────── RECENT FILLS ────────────────────────────
     last = cur.execute(
         "SELECT created_at, side, outcome, title, ROUND(price,4),"
         " ROUND(size,2), ROUND(notional_usd,2), status"
@@ -388,12 +468,20 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
         (mode,),
     ).fetchall()
     if last:
-        out.append("most recent fills:")
+        out.append(heading("recent fills"))
         for ts, side, outcome, title, price, size, notional, status in last:
-            tag = "[RESOLVE]" if status == "resolved" else f"[{side.upper()}]"
-            label = (title or "")[:50]
+            if status == "resolved":
+                tag = f"{c('cyan')}RESOLVE{c('reset')}"
+            elif side == "buy":
+                tag = f"{c('green')}BUY    {c('reset')}"
+            else:
+                tag = f"{c('red')}SELL   {c('reset')}"
+            label = (title or "")[:48]
+            short_ts = _utc_iso_to_local_str(ts)[5:16]  # MM-DD HH:MM
             out.append(
-                f"  {_utc_iso_to_local_str(ts)}  {tag:<10}  {outcome:<18} @${price:<7}  ${notional:<6}  {label}"
+                f"  {c('dim')}{short_ts}{c('reset')}  {tag}  "
+                f"{c('bold')}{fmt_money(notional):>7}{c('reset')}  "
+                f"{outcome:<18} @ ${price:<6}  {c('dim')}{label}{c('reset')}"
             )
 
     return "\n".join(out)
@@ -407,7 +495,15 @@ def main() -> None:
                     help="skip live midpoint fetch (faster, no PnL)")
     ap.add_argument("--resolve", action="store_true",
                     help="run resolution sweep before snapshot")
+    ap.add_argument("--no-color", action="store_true",
+                    help="disable ANSI colors (use on legacy terminals)")
     args = ap.parse_args()
+
+    if args.no_color:
+        for k in COLORS:
+            COLORS[k] = ""
+    else:
+        _enable_vt_mode()
 
     if args.resolve:
         # One-shot sweep using the SQLAlchemy session.

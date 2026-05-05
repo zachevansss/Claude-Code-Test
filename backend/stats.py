@@ -10,7 +10,9 @@ eyeballing (recent fills, top markets, rejections aren't tracked, fill rate)."""
 from __future__ import annotations
 
 import argparse
+import calendar
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -79,6 +81,79 @@ def heading(label: str, width: int = 68) -> str:
     inner = f" {label.upper()} "
     pad = width - len(inner) - 4
     return f"{c('cyan')}─── {inner}{'─' * max(pad, 0)}{c('reset')}"
+
+
+_ANSI_RE = re.compile(r"\033\[[\d;]+m")
+
+
+def _visible_len(s: str) -> int:
+    """Length excluding ANSI escape sequences."""
+    return len(_ANSI_RE.sub("", s))
+
+
+def _pad_visible(s: str, width: int) -> str:
+    """Left-pad string to `width` visible chars (ANSI codes not counted)."""
+    deficit = width - _visible_len(s)
+    return s + (" " * max(deficit, 0))
+
+
+def render_pnl_calendar(daily: dict, starting: float) -> list[str]:
+    """Monthly calendar grid showing realized $ and % per day for the
+    current local month. Today's date is bolded. Returns a list of lines."""
+    today = date.today()
+    year, month = today.year, today.month
+    month_name = calendar.month_name[month]
+    cal = calendar.Calendar(firstweekday=0)  # Monday-first
+    weeks = cal.monthdayscalendar(year, month)
+
+    cell_w = 10
+    cols = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    out = [heading(f"daily p&l calendar  ({month_name} {year})")]
+    out.append(
+        "  " + "".join(
+            f"{c('dim')}{col:<{cell_w}}{c('reset')}" for col in cols
+        ).rstrip()
+    )
+
+    for week in weeks:
+        day_row = ["  "]
+        amt_row = ["  "]
+        pct_row = ["  "]
+        for day in week:
+            if day == 0:
+                day_row.append(" " * cell_w)
+                amt_row.append(" " * cell_w)
+                pct_row.append(" " * cell_w)
+                continue
+            d = date(year, month, day)
+            day_label = str(day)
+            if d == today:
+                day_label = f"{c('bold')}{c('cyan')}{day_label}{c('reset')}"
+            day_row.append(_pad_visible(day_label, cell_w))
+
+            entry = daily.get(d)
+            if entry is None:
+                amt_row.append(" " * cell_w)
+                pct_row.append(" " * cell_w)
+                continue
+            pnl = entry["realized"]
+            pct = (pnl / starting * 100.0) if starting else 0.0
+            if pnl > 0:
+                amt = f"{c('green')}+${pnl:.2f}{c('reset')}"
+                pct_s = f"{c('green')}+{pct:.2f}%{c('reset')}"
+            elif pnl < 0:
+                amt = f"{c('red')}-${abs(pnl):.2f}{c('reset')}"
+                pct_s = f"{c('red')}{pct:.2f}%{c('reset')}"
+            else:
+                amt = f"{c('dim')}$0.00{c('reset')}"
+                pct_s = f"{c('dim')}0.00%{c('reset')}"
+            amt_row.append(_pad_visible(amt, cell_w))
+            pct_row.append(_pad_visible(pct_s, cell_w))
+        out.append("".join(day_row).rstrip())
+        out.append("".join(amt_row).rstrip())
+        out.append("".join(pct_row).rstrip())
+        out.append("")
+    return out
 
 
 def _utc_iso_to_local_date(ts: str) -> date | None:
@@ -348,18 +423,10 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
                f"  ({n_buys} buys / {n_sells} sells){c('reset')}")
     out.append("")
 
-    # ──────────────────────────── DAILY P&L ────────────────────────────
+    # ──────────────────────────── DAILY P&L (calendar) ────────────────────────────
     daily = compute_daily_pnl(con, mode)
     if daily:
-        out.append(heading("daily p&l"))
-        for day in sorted(daily.keys(), reverse=True)[:14]:
-            d = daily[day]
-            out.append(
-                f"  {day.isoformat()}   {fmt_pnl(d['realized'])}   "
-                f"{c('dim')}{d['buys']:>4} buys / {d['sells']:>3} sells"
-                f"  ({fmt_money(d['volume_buys'])} / {fmt_money(d['volume_sells'])}){c('reset')}"
-            )
-        out.append("")
+        out.extend(render_pnl_calendar(daily, starting))
 
     # ──────────────────────────── PERFORMANCE ────────────────────────────
     closed = cur.execute(

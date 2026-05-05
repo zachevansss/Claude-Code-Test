@@ -15,7 +15,7 @@ import sqlite3
 import sys
 import time
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timezone
 
 import httpx
 
@@ -26,6 +26,27 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "copytrade.db
 
 def fmt_money(x: float) -> str:
     return f"${x:,.2f}"
+
+
+def _utc_iso_to_local_date(ts: str) -> date | None:
+    """Parse a UTC ISO timestamp from the trades table and return the calendar
+    date in the system's local timezone. Trade.created_at is written by
+    datetime.utcnow() (naive but representing UTC), so we tag it UTC and let
+    .astimezone() shift it to local."""
+    try:
+        dt = datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+        return dt.astimezone().date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _utc_iso_to_local_str(ts: str) -> str:
+    """Same as above but returns a local-time string for display."""
+    try:
+        dt = datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return ts[:19]
 
 
 def compute_daily_pnl(con: sqlite3.Connection, mode: str) -> dict[date, dict]:
@@ -56,9 +77,8 @@ def compute_daily_pnl(con: sqlite3.Connection, mode: str) -> dict[date, dict]:
     ).fetchall()
 
     for ts, market_id, outcome, side, price, size, notional in rows:
-        try:
-            day = date.fromisoformat(ts[:10])
-        except (TypeError, ValueError):
+        day = _utc_iso_to_local_date(ts)
+        if day is None:
             continue
         pos = positions[(market_id, outcome)]
         bucket = daily[day]
@@ -357,7 +377,7 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
             label = (title or "(unknown market)")[:55]
             pnl_str = f"{fmt_money(pnl):>8}" if pnl is not None else "    n/a"
             out.append(
-                f"  {ts[:19]}  {won}  {outcome:<18}  {pnl_str}  {label}"
+                f"  {_utc_iso_to_local_str(ts)}  {won}  {outcome:<18}  {pnl_str}  {label}"
             )
         out.append("")
 
@@ -373,7 +393,7 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
             tag = "[RESOLVE]" if status == "resolved" else f"[{side.upper()}]"
             label = (title or "")[:50]
             out.append(
-                f"  {ts[:19]}  {tag:<10}  {outcome:<18} @${price:<7}  ${notional:<6}  {label}"
+                f"  {_utc_iso_to_local_str(ts)}  {tag:<10}  {outcome:<18} @${price:<7}  ${notional:<6}  {label}"
             )
 
     return "\n".join(out)

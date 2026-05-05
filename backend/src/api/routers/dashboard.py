@@ -26,30 +26,21 @@ _DB_PATH = os.path.join(os.path.dirname(os.path.abspath(stats.__file__)), "copyt
 
 import re
 
+# Sections that should span the full grid width (they have wide content)
+_WIDE_SECTIONS = {
+    "DAILY P&L CALENDAR",
+    "TOP OPEN POSITIONS",
+    "RECENT RESOLUTIONS",
+    "RECENT FILLS",
+}
 
-def _colorize_html(escaped: str) -> str:
-    """Light HTML pass to color positive (+$X) green and negative (-$X) red,
-    plus highlight section headers. Operates on already-html-escaped text."""
-    # Section headers like "─── ACCOUNT ─────────"
-    escaped = re.sub(
-        r"(───\s*[A-Z][A-Z &amp;0-9 ]*\s*───*)",
-        r'<span class="hdr">\1</span>',
-        escaped,
-    )
-    # The big "POLYMARKET COPY-TRADE BOT" banner
-    escaped = re.sub(
-        r"(═══\s*POLYMARKET COPY-TRADE BOT\s*═══)",
-        r'<span class="banner">\1</span>',
-        escaped,
-    )
-    # +$1,234.56 or +$1.50 (positive PnL)
+
+def _colorize_inline(escaped: str) -> str:
+    """Color spans for already-escaped HTML text inside a card body."""
     escaped = re.sub(r"(\+\$[\d,]+\.\d{2})", r'<span class="pos">\1</span>', escaped)
-    # -$1,234.56 (negative PnL)
     escaped = re.sub(r"(-\$[\d,]+\.\d{2})", r'<span class="neg">\1</span>', escaped)
-    # Percentages with sign: +3.72% or -3.72%
     escaped = re.sub(r"(\+\d+\.\d{2}%)", r'<span class="pos">\1</span>', escaped)
     escaped = re.sub(r"(?<![\d.])(-\d+\.\d{2}%)", r'<span class="neg">\1</span>', escaped)
-    # Status indicators
     escaped = escaped.replace("● RUNNING", '<span class="ok">● RUNNING</span>')
     escaped = escaped.replace("● STOPPED", '<span class="warn">● STOPPED</span>')
     escaped = re.sub(r"\bWON\b", '<span class="pos">WON</span>', escaped)
@@ -57,8 +48,56 @@ def _colorize_html(escaped: str) -> str:
     return escaped
 
 
+def _split_into_cards(rendered: str) -> list[tuple[str, str]]:
+    """Split rendered dashboard text into (heading, body) cards.
+
+    Lines before the first heading are returned as the special "BANNER" card.
+    Heading lines look like ``───  ACCOUNT  ───────────────────…``."""
+    sections: list[tuple[str, list[str]]] = [("BANNER", [])]
+    hdr_re = re.compile(r"^─── \s*(.+?)\s* ───+$")
+    for raw in rendered.splitlines():
+        m = hdr_re.match(raw.strip())
+        if m:
+            sections.append((m.group(1).strip().upper(), []))
+        else:
+            sections[-1][1].append(raw)
+
+    out: list[tuple[str, str]] = []
+    for title, lines in sections:
+        # Trim leading/trailing blank lines per card
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if not lines and title == "BANNER":
+            continue
+        out.append((title, "\n".join(lines)))
+    return out
+
+
 def _wrap_html(body_text: str, refresh_seconds: int) -> str:
-    safe = _colorize_html(html.escape(body_text))
+    cards = _split_into_cards(body_text)
+    card_html_parts: list[str] = []
+    for title, body in cards:
+        body_safe = _colorize_inline(html.escape(body))
+        css_class = "card"
+        if title == "BANNER":
+            css_class += " full"
+        elif any(title.startswith(name) for name in _WIDE_SECTIONS):
+            css_class += " wide"
+        if title == "BANNER":
+            # Banner has no title bar — content speaks for itself.
+            card_html_parts.append(
+                f'<div class="{css_class}"><pre>{body_safe}</pre></div>'
+            )
+        else:
+            card_html_parts.append(
+                f'<div class="{css_class}">'
+                f'<div class="card-title">{html.escape(title)}</div>'
+                f'<pre>{body_safe}</pre></div>'
+            )
+    cards_block = "\n".join(card_html_parts)
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -77,6 +116,7 @@ def _wrap_html(body_text: str, refresh_seconds: int) -> str:
     --banner: #c3a6ff;
     --warn: #d4a72c;
     --card: #161922;
+    --card2: #1a1e29;
     --border: #232733;
   }}
   * {{ box-sizing: border-box; }}
@@ -95,36 +135,63 @@ def _wrap_html(body_text: str, refresh_seconds: int) -> str:
   .meta {{
     color: var(--dim);
     font-size: 10px;
-    margin-bottom: 10px;
+    margin-bottom: 12px;
     text-align: center;
     letter-spacing: 0.05em;
     text-transform: uppercase;
+  }}
+  .grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 12px;
+    align-items: start;
+  }}
+  .card {{
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    overflow: hidden;
+  }}
+  .card.wide  {{ grid-column: span 2; }}
+  .card.full  {{ grid-column: 1 / -1; background: var(--card2); }}
+  .card-title {{
+    color: var(--hdr);
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    font-size: 10px;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+    margin-bottom: 8px;
   }}
   pre {{
     margin: 0;
     white-space: pre;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
-    background: var(--card);
-    padding: 14px 12px;
-    border-radius: 10px;
-    border: 1px solid var(--border);
   }}
   .pos    {{ color: var(--pos); font-weight: 600; }}
   .neg    {{ color: var(--neg); font-weight: 600; }}
-  .hdr    {{ color: var(--hdr); font-weight: 700; letter-spacing: 0.04em; }}
-  .banner {{ color: var(--banner); font-weight: 700; }}
   .ok     {{ color: var(--pos); }}
   .warn   {{ color: var(--warn); }}
-  @media (max-width: 600px) {{
+  /* Mobile: stack everything in one column */
+  @media (max-width: 760px) {{
     body {{ font-size: 11px; padding: 8px; }}
-    pre  {{ padding: 10px 8px; }}
+    .grid {{
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }}
+    .card.wide, .card.full {{ grid-column: 1; }}
+    .card {{ padding: 10px 12px; }}
   }}
 </style>
 </head>
 <body>
 <div class="meta">auto-refresh {refresh_seconds}s · read-only · pull to refresh</div>
-<pre>{safe}</pre>
+<div class="grid">
+{cards_block}
+</div>
 </body>
 </html>"""
 

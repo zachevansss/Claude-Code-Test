@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.api.routers import auth, bot, data, wallet
+from src.api.routers import auth, bot, dashboard, data, wallet
 from src.api.routers import settings as settings_router
 from src.api.routers import wallets
 from src.bot_manager.manager import bot_manager
@@ -53,6 +53,7 @@ def create_app() -> FastAPI:
     app.include_router(wallet.router, prefix="/wallet", tags=["wallet"])
     app.include_router(settings_router.router, prefix="/settings", tags=["settings"])
     app.include_router(data.router, tags=["data"])
+    app.include_router(dashboard.router, tags=["dashboard"])
 
     @app.get("/health")
     def health() -> dict:

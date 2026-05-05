@@ -29,8 +29,14 @@ log = get_logger("BOT_MANAGER")
 
 
 def _today_utc_start() -> datetime:
-    now = datetime.now(timezone.utc)
-    return now.replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
+    """Start of today in the system's *local* time, expressed as a naive UTC
+    datetime so it can be compared against Position.updated_at (which is
+    stored via datetime.utcnow()). Honors the operator's local trading day —
+    if you're in Central, the daily-loss window resets at midnight Central,
+    not midnight UTC."""
+    local_now = datetime.now().astimezone()
+    local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return local_midnight.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _load_seen_tx(db: Session, user_id: int) -> set[str]:

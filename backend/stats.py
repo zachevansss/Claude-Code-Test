@@ -97,6 +97,18 @@ def _pad_visible(s: str, width: int) -> str:
     return s + (" " * max(deficit, 0))
 
 
+def merge_columns(left: list[str], right: list[str], left_w: int = 44, gap: str = "  ") -> list[str]:
+    """Merge two text blocks side-by-side. Each row pairs left[i] (padded to
+    left_w visible chars) with right[i]. Shorter block padded with empty rows."""
+    rows = max(len(left), len(right))
+    out = []
+    for i in range(rows):
+        L = left[i] if i < len(left) else ""
+        R = right[i] if i < len(right) else ""
+        out.append(_pad_visible(L, left_w) + gap + R)
+    return out
+
+
 def render_pnl_calendar(daily: dict, starting: float) -> list[str]:
     """Monthly calendar grid showing realized $ and % per day for the
     current local month. Today's date is bolded. Returns a list of lines."""
@@ -374,61 +386,51 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     current_leverage_pct = (committed / account_value * 100.0) if account_value else 0.0
     daily_loss_cap_dollars = account_value * (daily_loss_pct / 100.0)
 
-    # ──────────────────────────── BANNER ────────────────────────────
+    # Build each section as its own list of lines first, then compose layout.
+    LEFT_W = 44
+
+    # ── Banner ──
     status_color = "green" if bot_status == "running" else "yellow"
-    out.append(f"{c('bold')}{c('cyan')}═══ POLYMARKET COPY-TRADE BOT ═══{c('reset')}  "
-               f"{c('dim')}{run_mode.upper()}{c('reset')}  "
-               f"{c(status_color)}● {bot_status.upper()}{c('reset')}")
-    out.append("")
+    banner = [
+        f"{c('bold')}{c('cyan')}═══ POLYMARKET COPY-TRADE BOT ═══{c('reset')}  "
+        f"{c('dim')}{run_mode.upper()}{c('reset')}  "
+        f"{c(status_color)}● {bot_status.upper()}{c('reset')}"
+    ]
 
-    # ──────────────────────────── ACCOUNT ────────────────────────────
-    out.append(heading("account"))
-    out.append(f"  {c('bold')}Total P&L{c('reset')}            "
-               f"{fmt_pnl(total_pnl)}   "
-               f"{c('green' if pnl_pct >= 0 else 'red')}{pnl_pct:+.2f}%{c('reset')}")
-    out.append(f"  {c('dim')}  realized{c('reset')}             {fmt_pnl(realized)}")
+    # ── Account ──
+    account = [heading("account", width=LEFT_W)]
+    account.append(f"  {c('bold')}Total P&L{c('reset')}        "
+                   f"{fmt_pnl(total_pnl)}  "
+                   f"{c('green' if pnl_pct >= 0 else 'red')}{pnl_pct:+.2f}%{c('reset')}")
+    account.append(f"  {c('dim')}  realized{c('reset')}         {fmt_pnl(realized)}")
     if asset_ids and not skip_prices:
-        out.append(f"  {c('dim')}  unrealized{c('reset')}           {fmt_pnl(unrealized)}  "
-                   f"{c('dim')}({priced}/{len(asset_ids)} priced){c('reset')}")
-    out.append("")
-    out.append(f"  Account Value         {c('bold')}{fmt_money(account_value):>11}{c('reset')}  "
-               f"{c('dim')}(started {fmt_money(starting)}){c('reset')}")
-    out.append(f"  Available Cash        {fmt_money(balance):>11}")
-    out.append(f"  Committed             {fmt_money(committed):>11}  "
-               f"{c('dim')}({open_positions} open positions){c('reset')}")
+        account.append(f"  {c('dim')}  unrealized{c('reset')}       {fmt_pnl(unrealized)}")
+    account.append("")
+    account.append(f"  Account Value     {c('bold')}{fmt_money(account_value):>11}{c('reset')}")
+    account.append(f"  Available Cash    {fmt_money(balance):>11}")
+    account.append(f"  Committed         {fmt_money(committed):>11}  {c('dim')}({open_positions} open){c('reset')}")
     if asset_ids and not skip_prices:
-        out.append(f"  Open Market Value     {fmt_money(market_value):>11}")
-    out.append("")
+        account.append(f"  Mkt Value (open)  {fmt_money(market_value):>11}")
 
-    # ──────────────────────────── RISK CAPS ────────────────────────────
-    out.append(heading("risk caps"))
+    # ── Risk Caps ──
+    risk = [heading("risk caps", width=LEFT_W)]
     lev_color = "yellow" if current_leverage_pct > max_leverage_pct * 0.7 else "green"
-    out.append(f"  Per-Trade           {per_trade_pct:>5.1f}%   "
-               f"{fmt_money(per_trade_cap):>10}")
+    risk.append(f"  Per-Trade       {per_trade_pct:>5.1f}%  {fmt_money(per_trade_cap):>10}")
     pmkt_str = "off" if per_market_pct >= 100 else fmt_money(per_market_cap)
-    out.append(f"  Per-Market          {per_market_pct:>5.1f}%   {pmkt_str:>10}")
-    out.append(f"  Total Leverage      {max_leverage_pct:>5.1f}%   "
-               f"{fmt_money(max_leverage_dollars):>10}   "
-               f"{c(lev_color)}{current_leverage_pct:>4.1f}% used{c('reset')}")
-    out.append(f"  Daily Loss          {daily_loss_pct:>5.1f}%   "
-               f"{fmt_money(daily_loss_cap_dollars):>10}")
-    out.append("")
+    risk.append(f"  Per-Market      {per_market_pct:>5.1f}%  {pmkt_str:>10}")
+    risk.append(f"  Total Leverage  {max_leverage_pct:>5.1f}%  {fmt_money(max_leverage_dollars):>10}  "
+                f"{c(lev_color)}{current_leverage_pct:>4.1f}% used{c('reset')}")
+    risk.append(f"  Daily Loss      {daily_loss_pct:>5.1f}%  {fmt_money(daily_loss_cap_dollars):>10}")
 
-    # ──────────────────────────── STRATEGY ────────────────────────────
-    out.append(heading("strategy"))
+    # ── Strategy ──
+    strat = [heading("strategy", width=LEFT_W)]
     curve_note = "" if mirror_power == 1.0 else f" ^ {mirror_power}"
-    out.append(f"  {strategy}  x{mirror_scale}{curve_note}   "
-               f"{c('dim')}min trade{c('reset')} {fmt_money(min_trade)}")
-    out.append(f"  {c('dim')}{n_fills} fills total · avg {fmt_money(avg_notional)}"
-               f"  ({n_buys} buys / {n_sells} sells){c('reset')}")
-    out.append("")
+    strat.append(f"  {strategy}  x{mirror_scale}{curve_note}   "
+                 f"{c('dim')}min{c('reset')} {fmt_money(min_trade)}")
+    strat.append(f"  {c('dim')}{n_fills} fills · avg {fmt_money(avg_notional)} · "
+                 f"{n_buys}B / {n_sells}S{c('reset')}")
 
-    # ──────────────────────────── DAILY P&L (calendar) ────────────────────────────
-    daily = compute_daily_pnl(con, mode)
-    if daily:
-        out.extend(render_pnl_calendar(daily, starting))
-
-    # ──────────────────────────── PERFORMANCE ────────────────────────────
+    # ── Performance ──
     closed = cur.execute(
         "SELECT realized_pnl_usd FROM positions"
         " WHERE mode = ? AND size = 0 AND realized_pnl_usd != 0",
@@ -440,21 +442,66 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     win_rate = (wins / total_closed * 100.0) if total_closed else 0.0
     avg_win = (sum(r[0] for r in closed if r[0] > 0) / wins) if wins else 0.0
     avg_loss = (sum(r[0] for r in closed if r[0] < 0) / losses) if losses else 0.0
+    perf: list[str] = []
     if total_closed:
-        out.append(heading("performance"))
+        perf = [heading("performance", width=LEFT_W)]
         wr_color = "green" if win_rate >= 60 else "yellow" if win_rate >= 50 else "red"
-        out.append(f"  Closed Positions      {total_closed}")
-        out.append(f"  Win Rate              {c(wr_color)}{c('bold')}{win_rate:>5.1f}%{c('reset')}  "
-                   f"{c('dim')}({c('green')}{wins} wins{c('reset')}{c('dim')} / "
-                   f"{c('red')}{losses} losses{c('reset')}{c('dim')}){c('reset')}")
-        out.append(f"  Avg Win               {fmt_pnl(avg_win)}")
-        out.append(f"  Avg Loss              {fmt_pnl(avg_loss)}")
-        out.append("")
+        perf.append(f"  Closed Positions  {total_closed}")
+        perf.append(f"  Win Rate          {c(wr_color)}{c('bold')}{win_rate:>5.1f}%{c('reset')}  "
+                    f"{c('dim')}({c('green')}{wins}W{c('reset')}{c('dim')}/"
+                    f"{c('red')}{losses}L{c('reset')}{c('dim')}){c('reset')}")
+        perf.append(f"  Avg Win           {fmt_pnl(avg_win)}")
+        perf.append(f"  Avg Loss          {fmt_pnl(avg_loss)}")
 
-    # ──────────────────────────── TOP OPEN POSITIONS ────────────────────────────
+    # ── Daily P&L Calendar (right column) ──
+    daily = compute_daily_pnl(con, mode)
+    cal_lines = render_pnl_calendar(daily, starting) if daily else []
+
+    # ── Biggest Winners / Losers ──
+    winners = cur.execute(
+        "SELECT p.outcome, p.realized_pnl_usd, p.updated_at,"
+        " (SELECT t.title FROM trades t WHERE t.user_id=p.user_id"
+        "    AND t.market_id=p.market_id AND t.outcome=p.outcome"
+        "    AND t.mode=p.mode AND t.title IS NOT NULL LIMIT 1) AS title"
+        " FROM positions p WHERE p.mode = ? AND p.realized_pnl_usd > 0"
+        " ORDER BY p.realized_pnl_usd DESC LIMIT 5",
+        (mode,),
+    ).fetchall()
+    losers = cur.execute(
+        "SELECT p.outcome, p.realized_pnl_usd, p.updated_at,"
+        " (SELECT t.title FROM trades t WHERE t.user_id=p.user_id"
+        "    AND t.market_id=p.market_id AND t.outcome=p.outcome"
+        "    AND t.mode=p.mode AND t.title IS NOT NULL LIMIT 1) AS title"
+        " FROM positions p WHERE p.mode = ? AND p.realized_pnl_usd < 0"
+        " ORDER BY p.realized_pnl_usd ASC LIMIT 5",
+        (mode,),
+    ).fetchall()
+    win_block: list[str] = []
+    if winners:
+        win_block.append(heading("biggest winners"))
+        for outcome, pnl, updated_at, title in winners:
+            label = (title or "(unknown)")[:50]
+            day = _utc_iso_to_local_str(updated_at)[:10] if updated_at else "       "
+            win_block.append(
+                f"  {c('dim')}{day}{c('reset')}  {fmt_pnl(pnl, width=9)}   "
+                f"{outcome:<18}  {c('dim')}{label}{c('reset')}"
+            )
+    lose_block: list[str] = []
+    if losers:
+        lose_block.append(heading("biggest losers"))
+        for outcome, pnl, updated_at, title in losers:
+            label = (title or "(unknown)")[:50]
+            day = _utc_iso_to_local_str(updated_at)[:10] if updated_at else "       "
+            lose_block.append(
+                f"  {c('dim')}{day}{c('reset')}  {fmt_pnl(pnl, width=9)}   "
+                f"{outcome:<18}  {c('dim')}{label}{c('reset')}"
+            )
+
+    # ── Top Open Positions (full width) ──
     top = sorted(market_data.values(), key=lambda r: -r[1])[:8]
+    open_block: list[str] = []
     if top:
-        out.append(heading("top open positions"))
+        open_block.append(heading("top open positions"))
         for outcome, notional, size, avg_price, asset_id, mid_id, title in top:
             mid = midpoints.get(asset_id) if asset_id else None
             if mid is not None:
@@ -465,47 +512,14 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
                 mv = notional
                 pnl_part = f"{c('dim')}     n/a{c('reset')}"
             header = (title[:66] + "…") if title and len(title) > 66 else (title or f"({mid_id[-8:]})")
-            out.append(f"  {c('bold')}{header}{c('reset')}")
-            out.append(
+            open_block.append(f"  {c('bold')}{header}{c('reset')}")
+            open_block.append(
                 f"      {outcome:<22} {c('dim')}cost{c('reset')} {fmt_money(notional):>7}  "
                 f"{c('dim')}mv{c('reset')} {fmt_money(mv):>7}  "
                 f"{c('dim')}upnl{c('reset')} {pnl_part}"
             )
-        out.append("")
 
-    # ──────────────────────────── BIGGEST WINNERS / LOSERS ────────────────────────────
-    winners = cur.execute(
-        "SELECT p.outcome, p.realized_pnl_usd,"
-        " (SELECT t.title FROM trades t WHERE t.user_id=p.user_id"
-        "    AND t.market_id=p.market_id AND t.outcome=p.outcome"
-        "    AND t.mode=p.mode AND t.title IS NOT NULL LIMIT 1) AS title"
-        " FROM positions p WHERE p.mode = ? AND p.realized_pnl_usd > 0"
-        " ORDER BY p.realized_pnl_usd DESC LIMIT 5",
-        (mode,),
-    ).fetchall()
-    losers = cur.execute(
-        "SELECT p.outcome, p.realized_pnl_usd,"
-        " (SELECT t.title FROM trades t WHERE t.user_id=p.user_id"
-        "    AND t.market_id=p.market_id AND t.outcome=p.outcome"
-        "    AND t.mode=p.mode AND t.title IS NOT NULL LIMIT 1) AS title"
-        " FROM positions p WHERE p.mode = ? AND p.realized_pnl_usd < 0"
-        " ORDER BY p.realized_pnl_usd ASC LIMIT 5",
-        (mode,),
-    ).fetchall()
-    if winners:
-        out.append(heading("biggest winners"))
-        for outcome, pnl, title in winners:
-            label = (title or "(unknown)")[:55]
-            out.append(f"  {fmt_pnl(pnl, width=9)}   {outcome:<20}  {c('dim')}{label}{c('reset')}")
-        out.append("")
-    if losers:
-        out.append(heading("biggest losers"))
-        for outcome, pnl, title in losers:
-            label = (title or "(unknown)")[:55]
-            out.append(f"  {fmt_pnl(pnl, width=9)}   {outcome:<20}  {c('dim')}{label}{c('reset')}")
-        out.append("")
-
-    # ──────────────────────────── RECENT RESOLUTIONS ────────────────────────────
+    # ── Recent Resolutions (full width) ──
     resolutions = cur.execute(
         "SELECT t.created_at, t.outcome, t.title, t.price, t.size,"
         " (SELECT p.realized_pnl_usd FROM positions p"
@@ -515,27 +529,28 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
         " ORDER BY t.id DESC LIMIT 8",
         (mode,),
     ).fetchall()
+    res_block: list[str] = []
     if resolutions:
-        out.append(heading("recent resolutions"))
+        res_block.append(heading("recent resolutions"))
         for ts, outcome, title, price, size, pnl in resolutions:
             won = price is not None and price > 0.5
             tag = f"{c('green')}WON {c('reset')}" if won else f"{c('red')}LOST{c('reset')}"
             label = (title or "(unknown)")[:50]
             pnl_part = fmt_pnl(pnl, width=9) if pnl is not None else f"{c('dim')}      n/a{c('reset')}"
-            short_ts = _utc_iso_to_local_str(ts)[5:16]  # MM-DD HH:MM
-            out.append(f"  {c('dim')}{short_ts}{c('reset')}  {tag}  {pnl_part}   "
-                       f"{outcome:<18} {c('dim')}{label}{c('reset')}")
-        out.append("")
+            short_ts = _utc_iso_to_local_str(ts)[5:16]
+            res_block.append(f"  {c('dim')}{short_ts}{c('reset')}  {tag}  {pnl_part}   "
+                             f"{outcome:<18} {c('dim')}{label}{c('reset')}")
 
-    # ──────────────────────────── RECENT FILLS ────────────────────────────
+    # ── Recent Fills (full width) ──
     last = cur.execute(
         "SELECT created_at, side, outcome, title, ROUND(price,4),"
         " ROUND(size,2), ROUND(notional_usd,2), status"
         " FROM trades WHERE mode = ? ORDER BY id DESC LIMIT 8",
         (mode,),
     ).fetchall()
+    fill_block: list[str] = []
     if last:
-        out.append(heading("recent fills"))
+        fill_block.append(heading("recent fills"))
         for ts, side, outcome, title, price, size, notional, status in last:
             if status == "resolved":
                 tag = f"{c('cyan')}RESOLVE{c('reset')}"
@@ -544,12 +559,45 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
             else:
                 tag = f"{c('red')}SELL   {c('reset')}"
             label = (title or "")[:48]
-            short_ts = _utc_iso_to_local_str(ts)[5:16]  # MM-DD HH:MM
-            out.append(
+            short_ts = _utc_iso_to_local_str(ts)[5:16]
+            fill_block.append(
                 f"  {c('dim')}{short_ts}{c('reset')}  {tag}  "
                 f"{c('bold')}{fmt_money(notional):>7}{c('reset')}  "
                 f"{outcome:<18} @ ${price:<6}  {c('dim')}{label}{c('reset')}"
             )
+
+    # ───────── Compose layout ─────────
+    # Detect terminal width — fall back to single-column on narrow shells.
+    try:
+        term_w = os.get_terminal_size().columns
+    except OSError:
+        term_w = 120
+    use_columns = term_w >= 110
+
+    out.extend(banner)
+    out.append("")
+
+    if use_columns:
+        # Left: account, risk, strategy, performance, winners, losers
+        # Right: calendar
+        left_col = (account + [""] + risk + [""] + strat + [""] +
+                    (perf + [""] if perf else []) +
+                    (win_block + [""] if win_block else []) +
+                    (lose_block if lose_block else []))
+        right_col = list(cal_lines)
+        out.extend(merge_columns(left_col, right_col, left_w=LEFT_W, gap="  "))
+    else:
+        # Single column fallback
+        for block in (account, risk, strat, perf, cal_lines, win_block, lose_block):
+            if block:
+                out.extend(block)
+                out.append("")
+
+    out.append("")
+    for block in (open_block, res_block, fill_block):
+        if block:
+            out.extend(block)
+            out.append("")
 
     return "\n".join(out)
 

@@ -458,44 +458,51 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     cal_lines = render_pnl_calendar(daily, starting) if daily else []
 
     # ── Biggest Winners / Losers ──
-    winners = cur.execute(
-        "SELECT p.outcome, p.realized_pnl_usd, p.updated_at,"
+    # Pull the most recent sell price (resolution or actual sell) per closed
+    # position so we can show buy → sell prices and % return.
+    winners_sql = (
+        "SELECT p.outcome, p.realized_pnl_usd, p.updated_at, p.avg_price,"
+        " (SELECT t.price FROM trades t WHERE t.user_id=p.user_id"
+        "    AND t.market_id=p.market_id AND t.outcome=p.outcome"
+        "    AND t.mode=p.mode AND t.side='sell' ORDER BY t.id DESC LIMIT 1) AS exit_price,"
         " (SELECT t.title FROM trades t WHERE t.user_id=p.user_id"
         "    AND t.market_id=p.market_id AND t.outcome=p.outcome"
         "    AND t.mode=p.mode AND t.title IS NOT NULL LIMIT 1) AS title"
-        " FROM positions p WHERE p.mode = ? AND p.realized_pnl_usd > 0"
-        " ORDER BY p.realized_pnl_usd DESC LIMIT 5",
-        (mode,),
-    ).fetchall()
-    losers = cur.execute(
-        "SELECT p.outcome, p.realized_pnl_usd, p.updated_at,"
-        " (SELECT t.title FROM trades t WHERE t.user_id=p.user_id"
-        "    AND t.market_id=p.market_id AND t.outcome=p.outcome"
-        "    AND t.mode=p.mode AND t.title IS NOT NULL LIMIT 1) AS title"
-        " FROM positions p WHERE p.mode = ? AND p.realized_pnl_usd < 0"
-        " ORDER BY p.realized_pnl_usd ASC LIMIT 5",
-        (mode,),
-    ).fetchall()
+        " FROM positions p WHERE p.mode = ? AND p.realized_pnl_usd {} 0"
+        " ORDER BY p.realized_pnl_usd {} LIMIT 5"
+    )
+    winners = cur.execute(winners_sql.format(">", "DESC"), (mode,)).fetchall()
+    losers = cur.execute(winners_sql.format("<", "ASC"), (mode,)).fetchall()
+
+    def _format_closed_row(row):
+        outcome, pnl, updated_at, avg_buy, exit_price, title = row
+        label = (title or "(unknown)")[:42]
+        day = _utc_iso_to_local_str(updated_at)[:10] if updated_at else "       "
+        if avg_buy and exit_price is not None:
+            ret_pct = (exit_price - avg_buy) / avg_buy * 100.0
+            color = "green" if ret_pct >= 0 else "red"
+            sign = "+" if ret_pct >= 0 else ""
+            prices = f"{avg_buy:.3f}→{exit_price:.3f}"
+            ret_part = f"{c(color)}{sign}{ret_pct:>6.1f}%{c('reset')}"
+        else:
+            prices = "  ?  →  ?  "
+            ret_part = f"{c('dim')}     ?{c('reset')}"
+        return (
+            f"  {c('dim')}{day}{c('reset')}  {fmt_pnl(pnl, width=9)}  "
+            f"{ret_part}  {c('dim')}{prices}{c('reset')}  "
+            f"{outcome:<16}  {c('dim')}{label}{c('reset')}"
+        )
+
     win_block: list[str] = []
     if winners:
         win_block.append(heading("biggest winners"))
-        for outcome, pnl, updated_at, title in winners:
-            label = (title or "(unknown)")[:50]
-            day = _utc_iso_to_local_str(updated_at)[:10] if updated_at else "       "
-            win_block.append(
-                f"  {c('dim')}{day}{c('reset')}  {fmt_pnl(pnl, width=9)}   "
-                f"{outcome:<18}  {c('dim')}{label}{c('reset')}"
-            )
+        for row in winners:
+            win_block.append(_format_closed_row(row))
     lose_block: list[str] = []
     if losers:
         lose_block.append(heading("biggest losers"))
-        for outcome, pnl, updated_at, title in losers:
-            label = (title or "(unknown)")[:50]
-            day = _utc_iso_to_local_str(updated_at)[:10] if updated_at else "       "
-            lose_block.append(
-                f"  {c('dim')}{day}{c('reset')}  {fmt_pnl(pnl, width=9)}   "
-                f"{outcome:<18}  {c('dim')}{label}{c('reset')}"
-            )
+        for row in losers:
+            lose_block.append(_format_closed_row(row))
 
     # ── Top Open Positions (full width) ──
     top = sorted(market_data.values(), key=lambda r: -r[1])[:8]
@@ -507,16 +514,23 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
             if mid is not None:
                 mv = size * mid
                 upnl = size * (mid - avg_price)
+                ret_pct = (mid - avg_price) / avg_price * 100.0 if avg_price else 0.0
                 pnl_part = fmt_pnl(upnl, width=10)
+                color = "green" if ret_pct >= 0 else "red"
+                sign = "+" if ret_pct >= 0 else ""
+                pct_part = f"{c(color)}{sign}{ret_pct:>6.1f}%{c('reset')}"
+                price_part = f"{c('dim')}{avg_price:.3f}→{mid:.3f}{c('reset')}"
             else:
                 mv = notional
                 pnl_part = f"{c('dim')}     n/a{c('reset')}"
+                pct_part = f"{c('dim')}      ?{c('reset')}"
+                price_part = f"{c('dim')}{avg_price:.3f}→  ?  {c('reset')}"
             header = (title[:66] + "…") if title and len(title) > 66 else (title or f"({mid_id[-8:]})")
             open_block.append(f"  {c('bold')}{header}{c('reset')}")
             open_block.append(
                 f"      {outcome:<22} {c('dim')}cost{c('reset')} {fmt_money(notional):>7}  "
                 f"{c('dim')}mv{c('reset')} {fmt_money(mv):>7}  "
-                f"{c('dim')}upnl{c('reset')} {pnl_part}"
+                f"{c('dim')}upnl{c('reset')} {pnl_part}  {pct_part}  {price_part}"
             )
 
     # ── Recent Resolutions (full width) ──

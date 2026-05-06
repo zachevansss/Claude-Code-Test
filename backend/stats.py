@@ -495,14 +495,55 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
 
     win_block: list[str] = []
     if winners:
-        win_block.append(heading("biggest winners"))
+        win_block.append(heading("biggest winners ($)"))
         for row in winners:
             win_block.append(_format_closed_row(row))
     lose_block: list[str] = []
     if losers:
-        lose_block.append(heading("biggest losers"))
+        lose_block.append(heading("biggest losers ($)"))
         for row in losers:
             lose_block.append(_format_closed_row(row))
+
+    # Pull all closed positions with their exit price so we can rank by %
+    # return as well as dollar PnL. Filter avg_price > 0 to avoid div-by-zero.
+    all_closed = cur.execute(
+        "SELECT p.outcome, p.realized_pnl_usd, p.updated_at, p.avg_price,"
+        " (SELECT t.price FROM trades t WHERE t.user_id=p.user_id"
+        "    AND t.market_id=p.market_id AND t.outcome=p.outcome"
+        "    AND t.mode=p.mode AND t.side='sell' ORDER BY t.id DESC LIMIT 1) AS exit_price,"
+        " (SELECT t.title FROM trades t WHERE t.user_id=p.user_id"
+        "    AND t.market_id=p.market_id AND t.outcome=p.outcome"
+        "    AND t.mode=p.mode AND t.title IS NOT NULL LIMIT 1) AS title"
+        " FROM positions p WHERE p.mode = ?"
+        "   AND p.size = 0 AND p.realized_pnl_usd != 0 AND p.avg_price > 0",
+        (mode,),
+    ).fetchall()
+
+    def _pct_ret(row):
+        _, _, _, avg, exit_p, _ = row
+        if avg and exit_p is not None:
+            return (exit_p - avg) / avg * 100.0
+        return None
+
+    pct_winners = sorted(
+        [r for r in all_closed if (_pct_ret(r) or 0) > 0],
+        key=lambda r: -(_pct_ret(r) or 0),
+    )[:5]
+    pct_losers = sorted(
+        [r for r in all_closed if (_pct_ret(r) or 0) < 0],
+        key=lambda r: (_pct_ret(r) or 0),
+    )[:5]
+
+    win_pct_block: list[str] = []
+    if pct_winners:
+        win_pct_block.append(heading("biggest winners (%)"))
+        for row in pct_winners:
+            win_pct_block.append(_format_closed_row(row))
+    lose_pct_block: list[str] = []
+    if pct_losers:
+        lose_pct_block.append(heading("biggest losers (%)"))
+        for row in pct_losers:
+            lose_pct_block.append(_format_closed_row(row))
 
     # ── Top Open Positions (full width) ──
     top = sorted(market_data.values(), key=lambda r: -r[1])[:8]
@@ -585,6 +626,7 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     out.append("")
     for block in (account, risk, strat, perf, cal_lines,
                   win_block, lose_block,
+                  win_pct_block, lose_pct_block,
                   open_block, res_block, fill_block):
         if block:
             out.extend(block)

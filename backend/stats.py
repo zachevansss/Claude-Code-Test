@@ -581,34 +581,11 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
             )
 
     # ───────── Compose layout ─────────
-    # Detect terminal width — fall back to single-column on narrow shells.
-    try:
-        term_w = os.get_terminal_size().columns
-    except OSError:
-        term_w = 120
-    use_columns = term_w >= 110
-
     out.extend(banner)
     out.append("")
-
-    if use_columns:
-        # Left: account, risk, strategy, performance, winners, losers
-        # Right: calendar
-        left_col = (account + [""] + risk + [""] + strat + [""] +
-                    (perf + [""] if perf else []) +
-                    (win_block + [""] if win_block else []) +
-                    (lose_block if lose_block else []))
-        right_col = list(cal_lines)
-        out.extend(merge_columns(left_col, right_col, left_w=LEFT_W, gap="  "))
-    else:
-        # Single column fallback
-        for block in (account, risk, strat, perf, cal_lines, win_block, lose_block):
-            if block:
-                out.extend(block)
-                out.append("")
-
-    out.append("")
-    for block in (open_block, res_block, fill_block):
+    for block in (account, risk, strat, perf, cal_lines,
+                  win_block, lose_block,
+                  open_block, res_block, fill_block):
         if block:
             out.extend(block)
             out.append("")

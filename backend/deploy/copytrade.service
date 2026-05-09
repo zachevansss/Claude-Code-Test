@@ -1,0 +1,35 @@
+[Unit]
+Description=Polymarket Copy-Trade Bot (FastAPI + uvicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# IMPORTANT: replace `ubuntu` with the non-root user you installed under
+# (whatever owns ~/copytrade). The default for fresh Hetzner/DO Ubuntu is
+# `ubuntu` or `root`; never run this as root in production.
+User=ubuntu
+Group=ubuntu
+
+WorkingDirectory=/home/ubuntu/copytrade/backend
+ExecStart=/home/ubuntu/copytrade/backend/.venv/bin/python main.py
+
+# Auto-restart on any failure or unexpected exit
+Restart=always
+RestartSec=5
+
+# Capture stdout/stderr into journald (view with: journalctl -u copytrade -f)
+StandardOutput=journal
+StandardError=journal
+
+# Modest hardening — don't let the process stomp on the system if compromised.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/copytrade/backend
+PrivateTmp=true
+
+# Reasonable resource limits for a small VPS
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

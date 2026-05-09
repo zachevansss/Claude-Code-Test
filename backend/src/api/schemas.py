@@ -104,12 +104,7 @@ class TradeOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# --- Managed wallet ---
-class ManagedWalletOut(BaseModel):
-    address: str
-    usdc_balance: float | None = None
-    matic_balance: float | None = None
-    balance_error: str | None = None  # populated if RPC lookup failed
+# --- Managed wallet --- (definition lives below near WalletImportRequest)
 
 
 class ApprovalAction(BaseModel):
@@ -130,6 +125,18 @@ class WalletImportRequest(BaseModel):
     # Required when overwriting an existing managed wallet. Refused if any live
     # trades already exist for the user (would orphan position state).
     replace_existing: bool = False
+    # For Polymarket Magic Link / email-signup users: the EOA private key signs
+    # orders but funds live in a separate proxy contract. Pass the address
+    # Polymarket shows as your account (the one with USDC) here.
+    proxy_address: str | None = None
+
+
+class ManagedWalletOut(BaseModel):
+    address: str
+    proxy_address: str | None = None
+    usdc_balance: float | None = None
+    matic_balance: float | None = None
+    balance_error: str | None = None
 
 
 # --- Stats ---

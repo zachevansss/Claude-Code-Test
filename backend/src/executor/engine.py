@@ -68,12 +68,33 @@ class ExecutionEngine:
         if self._client is not None:
             return self._client
         priv = WalletManager.get_private_key_hex(wallet)
-        client = ClobClient(
-            host=settings.polymarket_base_url,
-            key=priv,
-            chain_id=settings.polygon_chain_id,
-            signature_type=0,  # EOA — wallet is its own funder
-        )
+        # If the wallet has a proxy_address set, this is a Polymarket Magic Link
+        # / email-signup user: the EOA signs orders but funds + approvals live
+        # on the proxy contract. Use signature_type=1 (POLY_PROXY) and pass the
+        # proxy as the funder. Otherwise treat as a self-funded EOA.
+        if wallet.proxy_address:
+            client = ClobClient(
+                host=settings.polymarket_base_url,
+                key=priv,
+                chain_id=settings.polygon_chain_id,
+                signature_type=1,  # POLY_PROXY (Magic Link / email)
+                funder=wallet.proxy_address,
+            )
+            log.info(
+                "CLOB client init proxy mode user=%s eoa=%s funder=%s",
+                self.user_id, wallet.address, wallet.proxy_address,
+            )
+        else:
+            client = ClobClient(
+                host=settings.polymarket_base_url,
+                key=priv,
+                chain_id=settings.polygon_chain_id,
+                signature_type=0,  # EOA — wallet is its own funder
+            )
+            log.info(
+                "CLOB client init EOA mode user=%s address=%s",
+                self.user_id, wallet.address,
+            )
         # API creds are derived deterministically from the wallet key the first
         # time and re-derived thereafter — no separate registration call needed
         # for each restart.

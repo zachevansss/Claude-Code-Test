@@ -35,7 +35,11 @@ class WalletManager:
 
     @staticmethod
     def import_for_user(
-        user_id: int, private_key_hex: str, db: Session, replace_existing: bool = False
+        user_id: int,
+        private_key_hex: str,
+        db: Session,
+        replace_existing: bool = False,
+        proxy_address: str | None = None,
     ) -> ManagedWallet:
         """Import an existing EOA from a hex private key. By default refuses if
         a managed wallet already exists for this user — pass replace_existing=True
@@ -52,6 +56,16 @@ class WalletManager:
         except Exception as e:  # noqa: BLE001
             raise ValueError(f"invalid private key: {e}") from e
 
+        # Validate / normalize proxy address if provided
+        proxy = None
+        if proxy_address:
+            p = proxy_address.strip().lower()
+            if not p.startswith("0x") or len(p) != 42:
+                raise ValueError(
+                    "proxy_address must be a 0x-prefixed 42-character hex string"
+                )
+            proxy = p
+
         existing = (
             db.query(ManagedWallet).filter(ManagedWallet.user_id == user_id).first()
         )
@@ -63,18 +77,26 @@ class WalletManager:
                 )
             existing.address = acct.address.lower()
             existing.encrypted_private_key = encrypted
+            existing.proxy_address = proxy
             db.flush()
-            log.info("replaced managed wallet for user=%s address=%s", user_id, existing.address)
+            log.info(
+                "replaced managed wallet for user=%s address=%s proxy=%s",
+                user_id, existing.address, proxy or "(none)",
+            )
             return existing
 
         wallet = ManagedWallet(
             user_id=user_id,
             address=acct.address.lower(),
             encrypted_private_key=encrypted,
+            proxy_address=proxy,
         )
         db.add(wallet)
         db.flush()
-        log.info("imported managed wallet for user=%s address=%s", user_id, wallet.address)
+        log.info(
+            "imported managed wallet for user=%s address=%s proxy=%s",
+            user_id, wallet.address, proxy or "(none)",
+        )
         return wallet
 
     @staticmethod

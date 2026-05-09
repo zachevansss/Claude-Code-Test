@@ -34,9 +34,13 @@ def get_wallet(
     if not wallet:
         wallet = WalletManager.get_or_create(user.id, db)
 
-    usdc, matic, err = get_balances(wallet.address)
+    # For Magic Link users, the proxy holds the funds — read balances there.
+    # Self-funded EOA users have proxy_address NULL, fall through to EOA.
+    balance_addr = wallet.proxy_address or wallet.address
+    usdc, matic, err = get_balances(balance_addr)
     return ManagedWalletOut(
         address=wallet.address,
+        proxy_address=wallet.proxy_address,
         usdc_balance=usdc,
         matic_balance=matic,
         balance_error=err,
@@ -74,16 +78,22 @@ def import_wallet(
 
     try:
         wallet = WalletManager.import_for_user(
-            user.id, req.private_key, db, replace_existing=req.replace_existing
+            user.id,
+            req.private_key,
+            db,
+            replace_existing=req.replace_existing,
+            proxy_address=req.proxy_address,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     db.commit()
     db.refresh(wallet)
 
-    usdc, matic, err = get_balances(wallet.address)
+    balance_addr = wallet.proxy_address or wallet.address
+    usdc, matic, err = get_balances(balance_addr)
     return ManagedWalletOut(
         address=wallet.address,
+        proxy_address=wallet.proxy_address,
         usdc_balance=usdc,
         matic_balance=matic,
         balance_error=err,
@@ -99,6 +109,16 @@ def setup(
     )
     if not wallet:
         raise HTTPException(status_code=404, detail="No managed wallet for user")
+
+    # Magic Link / proxy-wallet users have approvals already set up by
+    # Polymarket itself when they created the account. The EOA we hold doesn't
+    # own anything to approve, and would just spend MATIC for no-op txs.
+    if wallet.proxy_address:
+        return WalletSetupOut(
+            address=wallet.proxy_address,
+            matic_balance=0.0,
+            actions=[],
+        )
 
     signer = WalletManager.get_signer(wallet)
     try:

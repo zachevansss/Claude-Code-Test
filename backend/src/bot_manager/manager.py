@@ -228,7 +228,9 @@ class BotManager:
                 if not managed:
                     log.warning("user=%s in live mode has no managed wallet — skipping tick", user_id)
                     return
-                live_balance = get_usdc_balance(managed.address)
+                # Magic Link users hold USDC on the proxy contract, not the EOA.
+                balance_addr = managed.proxy_address or managed.address
+                live_balance = get_usdc_balance(balance_addr)
                 if live_balance is None:
                     log.warning(
                         "user=%s live balance lookup failed — skipping tick (will retry next interval)",

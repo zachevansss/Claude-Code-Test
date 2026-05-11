@@ -52,6 +52,26 @@ Claude Code Test/                 ← project root
 
 ---
 
+## Infrastructure & external services
+
+These are the four outside services the bot leans on (in order of how essential they are right now).
+
+| Service | What it is | How it's integrated |
+|---|---|---|
+| **Polygon** | The Layer-2 blockchain Polymarket runs on. Everything on-chain — my proxy wallet, pUSD balance, the CTF Exchange v2 contract, conditional outcome tokens — lives here. Polygon mainnet is chain ID 137. | This is the substrate, not a thing I sign up for. The bot reads my pUSD balance from a Polygon address, sends approve/transfer txs to Polygon contracts, and submits orders that ultimately settle on Polygon. `POLYGON_CHAIN_ID=137` in `.env` pins it. |
+| **Alchemy** | A blockchain RPC provider — basically a "phone line" to Polygon. I have a free-tier account; their free quota (≈300M compute units/month) is far more than one bot needs. | My private RPC URL lives in `.env` as `POLYGON_RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/<key>`. Every module that touches Polygon — `wallet/balances.py`, `wallet/approvals.py`, `executor/engine.py` — reads it via `settings.polygon_rpc_url`. The free public endpoint (`polygon-rpc.com`) started returning 401s, so a paid-tier provider is required to talk to Polygon at all. |
+| **NordVPN** | Commercial VPN service. I use the Finland endpoint when I open Polymarket in my browser. | **Not integrated in code.** Polymarket geoblocks the US *website*, but `clob.polymarket.com` and `data-api.polymarket.com` (the APIs the bot calls) aren't geoblocked, so the bot itself doesn't need a VPN. The VPN matters when *I* log in to deposit, withdraw, or check the UI. Will become relevant for the VPS only if Hetzner's IP block ends up Polymarket-restricted. |
+| **Hetzner VPS** | Cheap European VPS provider (typically €4–8/month for a CX11 / CPX11 box). | **Not yet provisioned.** Planned home for the bot to run 24/7 instead of inside my PowerShell window. `backend/deploy/install.sh` and `backend/deploy/launch.md` are the scripts I'll run on the VPS at cutover — they set up systemd + the .env + the venv. Once migrated, the SQLite DB and `.env` live on the VPS, and my PC stops being the bot's home. |
+
+Mental-model notes:
+
+- **Polygon ≠ Polymarket.** Polymarket is the platform (UI, order book, CLOB API). Polygon is the chain underneath where everything actually settles. Alchemy lets me *read and write* Polygon; it has nothing to do with Polymarket directly.
+- **Alchemy is mission-critical even in paper mode.** `GET /wallet` reads pUSD over Alchemy. If the key dies or my quota runs out, the wallet endpoint returns `balance_error` and the UI shows $0.
+- **The VPN is for me, not the bot.** The bot's HTTPS calls to Polymarket's APIs work from any IP. So the bot can run on a US VPS, a Hetzner box, or my laptop without a VPN.
+- **Hetzner is the destination, not the present.** Right now the bot runs on this Windows box while it's on. The VPS migration is a separate going-live step.
+
+---
+
 ## How everything is wired together
 
 ```

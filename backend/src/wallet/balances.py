@@ -11,7 +11,15 @@ from src.utils.logging import get_logger
 
 log = get_logger("WALLET")
 
-# Polygon PoS USDC, used by Polymarket as collateral. 6 decimals.
+# Polymarket-issued pUSD (1:1 backed by USDC) became the exchange's collateral
+# token in the 2026-04-28 exchange upgrade. Reading USDC.e here returns 0 for
+# every post-upgrade Polymarket account, even though deposits succeed — the
+# Coinbase onramp wraps USDC into pUSD at deposit time. 6 decimals, same as USDC.
+PUSD_ADDRESS = Web3.to_checksum_address("0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB")
+PUSD_DECIMALS = 6
+
+# Kept for backward compatibility with approvals.py until that module is migrated
+# to approve pUSD against the (new) exchange. Do not use for balance reads.
 USDC_ADDRESS = Web3.to_checksum_address("0x2791bca1f2de4661ed88a30c99a7a9449aa84174")
 USDC_DECIMALS = 6
 
@@ -33,16 +41,19 @@ def _w3() -> Web3:
 
 
 def get_balances(address: str) -> tuple[float | None, float | None, str | None]:
-    """Return (usdc_balance, matic_balance, error). Best-effort — RPC failures
-    return Nones with the error string populated."""
+    """Return (collateral_balance, matic_balance, error) for a Polymarket
+    address. Collateral is pUSD post-2026-04-28; the first element is exposed
+    via the API as `usdc_balance` for now — it is the user's tradable USD
+    balance regardless of which token Polymarket happens to denominate it in.
+    Best-effort: RPC failures return Nones with the error string populated."""
     try:
         w3 = _w3()
         addr = Web3.to_checksum_address(address)
         matic_wei = w3.eth.get_balance(addr)
-        usdc = w3.eth.contract(address=USDC_ADDRESS, abi=ERC20_BALANCE_ABI)
-        usdc_raw = usdc.functions.balanceOf(addr).call()
+        pusd = w3.eth.contract(address=PUSD_ADDRESS, abi=ERC20_BALANCE_ABI)
+        pusd_raw = pusd.functions.balanceOf(addr).call()
         return (
-            usdc_raw / 10**USDC_DECIMALS,
+            pusd_raw / 10**PUSD_DECIMALS,
             matic_wei / 10**18,
             None,
         )
@@ -52,6 +63,7 @@ def get_balances(address: str) -> tuple[float | None, float | None, str | None]:
 
 
 def get_usdc_balance(address: str) -> float | None:
-    """Convenience for callers that only need USDC and don't care about errors."""
-    usdc, _, _ = get_balances(address)
-    return usdc
+    """Convenience for callers that only need the tradable collateral balance
+    and don't care about RPC errors. Despite the name, returns pUSD."""
+    bal, _, _ = get_balances(address)
+    return bal

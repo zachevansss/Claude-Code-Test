@@ -129,7 +129,7 @@ def normalize(items: list[dict]) -> list[dict]:
     return out
 
 
-def simulate(events: list[dict]) -> None:
+def simulate(events: list[dict], *, floor: float = LIVE_FLOOR) -> dict:
     balance = START_BANK
     # FIFO lots per (market, outcome): list of (size, entry_price, cost_basis)
     opens: dict[tuple, list[tuple[float, float, float]]] = {}
@@ -234,7 +234,7 @@ def simulate(events: list[dict]) -> None:
         notional = LIVE_SCALE * (source_notional ** LIVE_POWER)
 
         # 3. Floor
-        if notional < LIVE_FLOOR:
+        if notional < floor:
             skips["below_min_floor"] += 1
             continue
 
@@ -266,6 +266,31 @@ def simulate(events: list[dict]) -> None:
     # Final state
     remaining_cost = total_cost()
     open_lots = sum(len(q) for q in opens.values())
+    result = {
+        "floor": floor,
+        "events_processed": len(events),
+        "trades_taken": trades_taken,
+        "trades_skipped": dict(skips),
+        "redeems_processed": redeems_processed,
+        "redeems_ignored": redeems_skipped_no_match,
+        "insufficient_balance_events": insufficient_balance_events,
+        "min_cash": min_cash,
+        "peak_open_cost": peak_open_cost,
+        "peak_open_count": peak_open_count,
+        "peak_account": peak_account,
+        "realized_pnl": realized_total,
+        "ending_cash": balance,
+        "open_cost_remaining": remaining_cost,
+        "open_lots_remaining": open_lots,
+        "pnl_by_day": dict(pnl_by_day),
+        "opens_by_day": dict(opens_by_day),
+        "insufficient_by_day": dict(insufficient_by_day),
+        "day_start_account": dict(day_start_account),
+        "daily_pnl": dict(daily_pnl),
+        "n_days": len(day_start_account),
+        "period_start": events[0]["date"] if events else None,
+        "period_end": events[-1]["date"] if events else None,
+    }
 
     print()
     print("=" * 74)
@@ -316,6 +341,7 @@ def simulate(events: list[dict]) -> None:
     print(f"  {'date':<12} {'realized P&L':>14}   trades opened   insufficient-bal skips")
     for d, p in rows:
         print(f"  {d:<12} {p:>+13.2f}   {opens_by_day.get(d,0):>13}   {insufficient_by_day.get(d,0):>10}")
+    return result
 
 
 def main() -> None:

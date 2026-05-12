@@ -9,6 +9,15 @@ same balance/exposure math the bot uses, plus a few extra columns useful for
 eyeballing (recent fills, top markets, rejections aren't tracked, fill rate)."""
 from __future__ import annotations
 
+# Use the OS-native trust store on Windows + OneDrive + Microsoft Store Python,
+# where certifi-based chain validation is broken (see main.py for context).
+# Without this, /midpoints calls fail and the dashboard shows "?" for live prices.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
 import argparse
 import calendar
 import os

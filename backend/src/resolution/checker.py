@@ -40,7 +40,8 @@ CLOB_BASE = "https://clob.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
 RESOLVE_LOW = 0.02
 RESOLVE_HIGH = 0.98
-GAMMA_BATCH_SIZE = 50
+GAMMA_BATCH_SIZE = 20
+GAMMA_MIN_BATCH = 5  # below this, we give up rather than spam single-cid retries
 
 
 def _fetch_prices(asset_ids: list[str]) -> dict[str, float]:
@@ -65,58 +66,87 @@ def _fetch_prices(asset_ids: list[str]) -> dict[str, float]:
     return out
 
 
+def _gamma_query(condition_ids: list[str]) -> list[dict] | None:
+    """Single batched call. Returns the payload list on 2xx, None on error
+    (signal to caller that this batch needs to be retried with a smaller size)."""
+    params: list[tuple[str, str]] = [("condition_ids", c) for c in condition_ids]
+    params.append(("closed", "true"))
+    params.append(("limit", str(len(condition_ids))))
+    try:
+        r = httpx.get(f"{GAMMA_API}/markets", params=params, timeout=10.0)
+        r.raise_for_status()
+        payload = r.json()
+    except Exception as e:  # noqa: BLE001
+        log.debug("gamma-api batch of %d failed: %s", len(condition_ids), e)
+        return None
+    return payload if isinstance(payload, list) else None
+
+
+def _parse_gamma_settle(m: dict) -> tuple[str, dict[str, float]] | None:
+    """Pull (conditionId, {asset_id: settle_price}) out of one market row.
+    Returns None for malformed rows."""
+    cid = m.get("conditionId")
+    if not cid:
+        return None
+    prices_raw = m.get("outcomePrices")
+    tokens_raw = m.get("clobTokenIds")
+    if isinstance(prices_raw, str):
+        try:
+            prices_raw = json.loads(prices_raw)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(tokens_raw, str):
+        try:
+            tokens_raw = json.loads(tokens_raw)
+        except json.JSONDecodeError:
+            return None
+    if not (isinstance(prices_raw, list) and isinstance(tokens_raw, list)):
+        return None
+    if len(prices_raw) != len(tokens_raw):
+        return None
+    try:
+        settle = {str(tok): float(p) for tok, p in zip(tokens_raw, prices_raw)}
+    except (TypeError, ValueError):
+        return None
+    return cid, settle
+
+
 def _fetch_resolved_from_gamma(condition_ids: list[str]) -> dict[str, dict[str, float]]:
     """Return {conditionId: {asset_id: settle_price}} for markets gamma-api
     reports as closed (officially resolved on Polymarket).
 
-    Fails open: returns {} on any error, letting the caller fall through to
-    the heuristic on /midpoints + /last-trades-prices."""
+    Batches the query at GAMMA_BATCH_SIZE. On a batch failure (gamma-api 500s
+    intermittently on bigger batches), recursively halves the batch and retries
+    until either success or batch size < GAMMA_MIN_BATCH.
+
+    Fails open per branch: returns whatever it successfully collected, letting
+    the caller fall through to the heuristic on /midpoints + /last-trades-prices
+    for anything missing."""
     if not condition_ids:
         return {}
     out: dict[str, dict[str, float]] = {}
+
+    def consume(batch: list[str]) -> None:
+        if not batch:
+            return
+        payload = _gamma_query(batch)
+        if payload is not None:
+            for m in payload:
+                parsed = _parse_gamma_settle(m)
+                if parsed is not None:
+                    out[parsed[0]] = parsed[1]
+            return
+        # Failure: split and retry, unless we're already small enough that
+        # further splitting just floods the API for no benefit.
+        if len(batch) < GAMMA_MIN_BATCH:
+            log.warning("gamma-api batch of %d failed, giving up on these ids", len(batch))
+            return
+        mid = len(batch) // 2
+        consume(batch[:mid])
+        consume(batch[mid:])
+
     for i in range(0, len(condition_ids), GAMMA_BATCH_SIZE):
-        batch = condition_ids[i:i + GAMMA_BATCH_SIZE]
-        params: list[tuple[str, str]] = [("condition_ids", c) for c in batch]
-        params.append(("closed", "true"))
-        params.append(("limit", str(GAMMA_BATCH_SIZE)))
-        try:
-            r = httpx.get(f"{GAMMA_API}/markets", params=params, timeout=10.0)
-            r.raise_for_status()
-        except Exception as e:  # noqa: BLE001
-            log.warning("gamma-api resolved lookup failed: %s", e)
-            continue
-        try:
-            payload = r.json()
-        except ValueError:
-            continue
-        if not isinstance(payload, list):
-            continue
-        for m in payload:
-            cid = m.get("conditionId")
-            if not cid:
-                continue
-            prices_raw = m.get("outcomePrices")
-            tokens_raw = m.get("clobTokenIds")
-            # Both come back as JSON-encoded strings on this endpoint.
-            if isinstance(prices_raw, str):
-                try:
-                    prices_raw = json.loads(prices_raw)
-                except json.JSONDecodeError:
-                    continue
-            if isinstance(tokens_raw, str):
-                try:
-                    tokens_raw = json.loads(tokens_raw)
-                except json.JSONDecodeError:
-                    continue
-            if not (isinstance(prices_raw, list) and isinstance(tokens_raw, list)):
-                continue
-            if len(prices_raw) != len(tokens_raw):
-                continue
-            try:
-                settle = {str(tok): float(p) for tok, p in zip(tokens_raw, prices_raw)}
-            except (TypeError, ValueError):
-                continue
-            out[cid] = settle
+        consume(condition_ids[i:i + GAMMA_BATCH_SIZE])
     return out
 
 

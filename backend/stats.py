@@ -27,8 +27,12 @@ import sys
 import time
 from collections import defaultdict
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 import httpx
+
+# Central time zone (handles CST/CDT automatically based on date)
+_CENTRAL_TZ = ZoneInfo("America/Chicago")
 
 CLOB_BASE = "https://clob.polymarket.com"
 
@@ -196,6 +200,15 @@ def _utc_iso_to_local_str(ts: str) -> str:
         return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
     except (TypeError, ValueError):
         return ts[:19]
+
+
+def _utc_iso_to_central_short(ts: str) -> str:
+    """MM-DD HH:MM AM/PM in America/Chicago for fills/resolutions rows."""
+    try:
+        dt = datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+        return dt.astimezone(_CENTRAL_TZ).strftime("%m-%d %I:%M %p")
+    except (TypeError, ValueError):
+        return ts[5:16]
 
 
 def compute_daily_pnl(con: sqlite3.Connection, mode: str) -> dict[date, dict]:
@@ -538,21 +551,12 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
         [r for r in all_closed if (_pct_ret(r) or 0) > 0],
         key=lambda r: -(_pct_ret(r) or 0),
     )[:5]
-    pct_losers = sorted(
-        [r for r in all_closed if (_pct_ret(r) or 0) < 0],
-        key=lambda r: (_pct_ret(r) or 0),
-    )[:5]
 
     win_pct_block: list[str] = []
     if pct_winners:
         win_pct_block.append(heading("biggest winners (%)"))
         for row in pct_winners:
             win_pct_block.append(_format_closed_row(row))
-    lose_pct_block: list[str] = []
-    if pct_losers:
-        lose_pct_block.append(heading("biggest losers (%)"))
-        for row in pct_losers:
-            lose_pct_block.append(_format_closed_row(row))
 
     # ── Top Open Positions (full width) ──
     top = sorted(market_data.values(), key=lambda r: -r[1])[:8]
@@ -601,7 +605,7 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
             tag = f"{c('green')}WON {c('reset')}" if won else f"{c('red')}LOST{c('reset')}"
             label = (title or "(unknown)")[:50]
             pnl_part = fmt_pnl(pnl, width=9) if pnl is not None else f"{c('dim')}      n/a{c('reset')}"
-            short_ts = _utc_iso_to_local_str(ts)[5:16]
+            short_ts = _utc_iso_to_central_short(ts)
             res_block.append(f"  {c('dim')}{short_ts}{c('reset')}  {tag}  {pnl_part}   "
                              f"{outcome:<18} {c('dim')}{label}{c('reset')}")
 
@@ -623,7 +627,7 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
             else:
                 tag = f"{c('red')}SELL   {c('reset')}"
             label = (title or "")[:48]
-            short_ts = _utc_iso_to_local_str(ts)[5:16]
+            short_ts = _utc_iso_to_central_short(ts)
             fill_block.append(
                 f"  {c('dim')}{short_ts}{c('reset')}  {tag}  "
                 f"{c('bold')}{fmt_money(notional):>7}{c('reset')}  "
@@ -634,8 +638,7 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     out.extend(banner)
     out.append("")
     for block in (account, risk, strat, perf, cal_lines,
-                  win_block, lose_block,
-                  win_pct_block, lose_pct_block,
+                  win_block, win_pct_block, lose_block,
                   open_block, res_block, fill_block):
         if block:
             out.extend(block)

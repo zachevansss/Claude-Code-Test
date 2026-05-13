@@ -6,21 +6,26 @@ Polymarket's activity API does NOT surface redemptions as TRADE events, so
 the tracker has nothing to copy. Without this checker our open positions just
 sit forever, with avg_price as cost basis and no realized PnL.
 
-Detection strategy (pragmatic, not perfect):
-  1. /midpoints batch for all distinct asset_ids
-  2. Anything missing from the response has no live orderbook — typically
-     resolved, occasionally just illiquid
-  3. /last-trades-prices for those missing assets
-  4. If the last trade settled at an extreme (<=0.02 or >=0.98), treat as
-     resolved at that price
-  5. Otherwise leave it open — better to under-close than wrongly close an
-     illiquid-but-not-resolved market
+Detection strategy (in order, fail-open at each step):
+  1. gamma-api `/markets?closed=true&condition_ids=...` — Polymarket's
+     authoritative resolution status. Returns final outcomePrices ([1,0] or
+     [0,1]) for resolved markets. Close at that exact price.
+  2. /midpoints batch — anything still in the orderbook is unresolved.
+  3. /last-trades-prices for missing midpoints, with extreme-price heuristic
+     (<=0.02 or >=0.98) as a backstop for markets that don't appear in
+     gamma-api yet but have clearly settled.
+
+The gamma-api step was added after observing that some markets resolve while
+their last on-CLOB trade still sat mid-range (e.g., 0.23 for a side that
+ultimately settled at 0). Without it, those positions stay open forever and
+the dashboard shows stale mark-to-market values.
 
 Closing writes a synthetic Trade row (side='sell', status='resolved',
 external_tx=NULL) and zeros out the Position size, capturing the realized PnL
 on the Position row via the standard sell math."""
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 import httpx
@@ -32,8 +37,10 @@ from src.utils.logging import get_logger
 log = get_logger("RESOLUTION")
 
 CLOB_BASE = "https://clob.polymarket.com"
+GAMMA_API = "https://gamma-api.polymarket.com"
 RESOLVE_LOW = 0.02
 RESOLVE_HIGH = 0.98
+GAMMA_BATCH_SIZE = 50
 
 
 def _fetch_prices(asset_ids: list[str]) -> dict[str, float]:
@@ -58,6 +65,61 @@ def _fetch_prices(asset_ids: list[str]) -> dict[str, float]:
     return out
 
 
+def _fetch_resolved_from_gamma(condition_ids: list[str]) -> dict[str, dict[str, float]]:
+    """Return {conditionId: {asset_id: settle_price}} for markets gamma-api
+    reports as closed (officially resolved on Polymarket).
+
+    Fails open: returns {} on any error, letting the caller fall through to
+    the heuristic on /midpoints + /last-trades-prices."""
+    if not condition_ids:
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    for i in range(0, len(condition_ids), GAMMA_BATCH_SIZE):
+        batch = condition_ids[i:i + GAMMA_BATCH_SIZE]
+        params: list[tuple[str, str]] = [("condition_ids", c) for c in batch]
+        params.append(("closed", "true"))
+        params.append(("limit", str(GAMMA_BATCH_SIZE)))
+        try:
+            r = httpx.get(f"{GAMMA_API}/markets", params=params, timeout=10.0)
+            r.raise_for_status()
+        except Exception as e:  # noqa: BLE001
+            log.warning("gamma-api resolved lookup failed: %s", e)
+            continue
+        try:
+            payload = r.json()
+        except ValueError:
+            continue
+        if not isinstance(payload, list):
+            continue
+        for m in payload:
+            cid = m.get("conditionId")
+            if not cid:
+                continue
+            prices_raw = m.get("outcomePrices")
+            tokens_raw = m.get("clobTokenIds")
+            # Both come back as JSON-encoded strings on this endpoint.
+            if isinstance(prices_raw, str):
+                try:
+                    prices_raw = json.loads(prices_raw)
+                except json.JSONDecodeError:
+                    continue
+            if isinstance(tokens_raw, str):
+                try:
+                    tokens_raw = json.loads(tokens_raw)
+                except json.JSONDecodeError:
+                    continue
+            if not (isinstance(prices_raw, list) and isinstance(tokens_raw, list)):
+                continue
+            if len(prices_raw) != len(tokens_raw):
+                continue
+            try:
+                settle = {str(tok): float(p) for tok, p in zip(tokens_raw, prices_raw)}
+            except (TypeError, ValueError):
+                continue
+            out[cid] = settle
+    return out
+
+
 def _fetch_last_prices(asset_ids: list[str]) -> dict[str, float]:
     if not asset_ids:
         return {}
@@ -77,6 +139,58 @@ def _fetch_last_prices(asset_ids: list[str]) -> dict[str, float]:
     except Exception as e:  # noqa: BLE001
         log.warning("last-trades-prices fetch failed: %s", e)
     return out
+
+
+def _close_position(
+    db: Session,
+    user_id: int,
+    mode: str,
+    pos: Position,
+    asset: str,
+    settle_price: float,
+    *,
+    source: str,
+) -> None:
+    """Synthesize a 'sell' Trade row at settle_price and zero out the position.
+    `source` is just a label for the log line: 'gamma' vs 'heuristic'."""
+    size = pos.size
+    avg = pos.avg_price
+    realized_delta = (settle_price - avg) * size
+    notional = settle_price * size
+    title_row = (
+        db.query(Trade.title)
+        .filter(
+            Trade.user_id == user_id,
+            Trade.market_id == pos.market_id,
+            Trade.outcome == pos.outcome,
+            Trade.mode == mode,
+            Trade.title.isnot(None),
+        )
+        .first()
+    )
+    synth = Trade(
+        user_id=user_id,
+        source_wallet="resolution",
+        market_id=pos.market_id,
+        asset_id=asset,
+        outcome=pos.outcome,
+        title=title_row[0] if title_row else None,
+        side="sell",
+        price=settle_price,
+        size=size,
+        notional_usd=notional,
+        mode=mode,
+        status="resolved",
+        external_tx=None,
+        created_at=datetime.utcnow(),
+    )
+    db.add(synth)
+    pos.realized_pnl_usd += realized_delta
+    pos.size = 0.0
+    log.info(
+        "resolved [%s] user=%s %s @%.4f size=%.2f cost_avg=%.4f pnl=%+.2f",
+        source, user_id, pos.outcome, settle_price, size, avg, realized_delta,
+    )
 
 
 def check_resolutions(db: Session, user_id: int, mode: str = "paper") -> int:
@@ -120,13 +234,36 @@ def check_resolutions(db: Session, user_id: int, mode: str = "paper") -> int:
     if not positions:
         return 0
 
-    asset_ids = [a for _, a in positions]
+    # Step 1: authoritative gamma-api resolution. Markets here are officially
+    # closed with deterministic outcomePrices ([1,0] or [0,1]). Settle exact.
+    condition_ids = list({pos.market_id for pos, _ in positions})
+    gamma_resolved = _fetch_resolved_from_gamma(condition_ids)
+
+    closed = 0
+    unresolved: list[tuple[Position, str]] = []
+
+    for pos, asset in positions:
+        settles = gamma_resolved.get(pos.market_id)
+        if settles is None or asset not in settles:
+            unresolved.append((pos, asset))
+            continue
+        _close_position(db, user_id, mode, pos, asset, settles[asset], source="gamma")
+        closed += 1
+
+    if not unresolved:
+        if closed:
+            db.commit()
+        return closed
+
+    # Step 2 + 3: fall back to /midpoints + /last-trades-prices heuristic for
+    # markets gamma-api didn't return (e.g., very fresh resolutions that haven't
+    # propagated yet, or markets gamma-api doesn't index).
+    asset_ids = [a for _, a in unresolved]
     mids = _fetch_prices(asset_ids)
     missing = [a for a in asset_ids if a not in mids]
     last_prices = _fetch_last_prices(missing) if missing else {}
 
-    closed = 0
-    for pos, asset in positions:
+    for pos, asset in unresolved:
         if asset in mids:
             continue  # market still has an orderbook — not resolved
         last = last_prices.get(asset)
@@ -134,50 +271,8 @@ def check_resolutions(db: Session, user_id: int, mode: str = "paper") -> int:
             continue  # no signal at all — leave open
         if RESOLVE_LOW < last < RESOLVE_HIGH:
             continue  # mid-range last trade — likely just illiquid, skip
-
-        # Close the position at the settled price.
-        size = pos.size
-        avg = pos.avg_price
-        realized_delta = (last - avg) * size
-        notional = last * size
-
-        # Carry the market title forward from any prior trade row so the
-        # resolution sell shows a meaningful name in the dashboard.
-        title_row = (
-            db.query(Trade.title)
-            .filter(
-                Trade.user_id == user_id,
-                Trade.market_id == pos.market_id,
-                Trade.outcome == pos.outcome,
-                Trade.mode == mode,
-                Trade.title.isnot(None),
-            )
-            .first()
-        )
-        synth = Trade(
-            user_id=user_id,
-            source_wallet="resolution",
-            market_id=pos.market_id,
-            asset_id=asset,
-            outcome=pos.outcome,
-            title=title_row[0] if title_row else None,
-            side="sell",
-            price=last,
-            size=size,
-            notional_usd=notional,
-            mode=mode,
-            status="resolved",
-            external_tx=None,
-            created_at=datetime.utcnow(),
-        )
-        db.add(synth)
-        pos.realized_pnl_usd += realized_delta
-        pos.size = 0.0
+        _close_position(db, user_id, mode, pos, asset, last, source="heuristic")
         closed += 1
-        log.info(
-            "resolved user=%s %s @%.4f size=%.2f cost_avg=%.4f pnl=%+.2f",
-            user_id, pos.outcome, last, size, avg, realized_delta,
-        )
 
     if closed:
         db.commit()

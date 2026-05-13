@@ -7,6 +7,7 @@ Uses the paper-mode trade ledger as the source of source-trader signals
 floor's source-side threshold of $400)."""
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections import Counter, defaultdict
 from statistics import mean
@@ -17,7 +18,7 @@ DB = "copytrade.db"
 
 START_BANK = 1000.0
 SCALE_RATIO = 0.075 / 0.1  # 0.75
-LIVE_FLOOR = 1.5
+LIVE_FLOOR = float(os.environ.get("LIVE_FLOOR", "1.5"))  # override via env
 LIVE_MAX_PCT_PER_TRADE = 0.02
 LIVE_DAILY_LOSS_CAP_PCT = 0.10
 
@@ -156,7 +157,7 @@ def main() -> None:
     print()
     print(bar)
     print(f"$1k LIVE REPLAY — full 11-day paper window")
-    print(f"  bank=$1000  scale=0.075  power=0.5  min_trade=$1.50  max_per_trade=2%")
+    print(f"  bank=$1000  scale=0.075  power=0.5  min_trade=${LIVE_FLOOR:.2f}  max_per_trade=2%")
     print(f"  daily_loss_cap=10%  max_leverage=off  slippage=1.5%")
     print(bar)
 

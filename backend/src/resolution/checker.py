@@ -26,7 +26,7 @@ on the Position row via the standard sell math."""
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 from sqlalchemy.orm import Session
@@ -82,9 +82,45 @@ def _gamma_query(condition_ids: list[str]) -> list[dict] | None:
     return payload if isinstance(payload, list) else None
 
 
-def _parse_gamma_settle(m: dict) -> tuple[str, dict[str, float]] | None:
-    """Pull (conditionId, {asset_id: settle_price}) out of one market row.
-    Returns None for malformed rows."""
+def _parse_gamma_close_time(m: dict) -> datetime | None:
+    """Pull the market's actual resolution timestamp.
+
+    Preference order: closedTime (UMA resolved-at) > umaEndDate > endDate.
+    Returns None if all are missing or malformed. Future-dated values are
+    discarded since they indicate the resolution time hasn't been set yet
+    (some markets report endDate while still awaiting UMA finalization).
+    """
+    for field in ("closedTime", "umaEndDate", "endDate"):
+        raw = m.get(field)
+        if not raw:
+            continue
+        # Normalize to UTC-aware datetime. Polymarket emits a mix of:
+        #   '2026-05-10T02:16:57Z'
+        #   '2026-05-10 02:16:57+00'
+        #   '2026-05-09T19:00:00.000Z'
+        s = raw.replace("Z", "+00:00") if isinstance(raw, str) else raw
+        if isinstance(s, str) and s.endswith("+00"):
+            s = s + ":00"
+        try:
+            dt = datetime.fromisoformat(s) if isinstance(s, str) else None
+        except ValueError:
+            dt = None
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        # Reject future-dated (means UMA hasn't finalized yet — let utcnow win).
+        now = datetime.now(timezone.utc)
+        if dt > now:
+            continue
+        # SQLite stores naive UTC; strip tz to match.
+        return dt.replace(tzinfo=None)
+    return None
+
+
+def _parse_gamma_settle(m: dict) -> tuple[str, dict[str, float], datetime | None] | None:
+    """Pull (conditionId, {asset_id: settle_price}, close_at) out of one market
+    row. Returns None for malformed rows; close_at None means "use now"."""
     cid = m.get("conditionId")
     if not cid:
         return None
@@ -108,23 +144,21 @@ def _parse_gamma_settle(m: dict) -> tuple[str, dict[str, float]] | None:
         settle = {str(tok): float(p) for tok, p in zip(tokens_raw, prices_raw)}
     except (TypeError, ValueError):
         return None
-    return cid, settle
+    return cid, settle, _parse_gamma_close_time(m)
 
 
-def _fetch_resolved_from_gamma(condition_ids: list[str]) -> dict[str, dict[str, float]]:
-    """Return {conditionId: {asset_id: settle_price}} for markets gamma-api
-    reports as closed (officially resolved on Polymarket).
+def _fetch_resolved_from_gamma(
+    condition_ids: list[str],
+) -> dict[str, tuple[dict[str, float], datetime | None]]:
+    """Return {conditionId: ({asset_id: settle_price}, close_at)} for markets
+    gamma-api reports as closed. close_at is the market's actual resolution
+    time (UMA closedTime / endDate) for accurate dating of synthetic trades.
 
-    Batches the query at GAMMA_BATCH_SIZE. On a batch failure (gamma-api 500s
-    intermittently on bigger batches), recursively halves the batch and retries
-    until either success or batch size < GAMMA_MIN_BATCH.
-
-    Fails open per branch: returns whatever it successfully collected, letting
-    the caller fall through to the heuristic on /midpoints + /last-trades-prices
-    for anything missing."""
+    Batches at GAMMA_BATCH_SIZE; on failure recursively halves until either
+    success or batch size < GAMMA_MIN_BATCH. Fails open per branch."""
     if not condition_ids:
         return {}
-    out: dict[str, dict[str, float]] = {}
+    out: dict[str, tuple[dict[str, float], datetime | None]] = {}
 
     def consume(batch: list[str]) -> None:
         if not batch:
@@ -134,10 +168,9 @@ def _fetch_resolved_from_gamma(condition_ids: list[str]) -> dict[str, dict[str, 
             for m in payload:
                 parsed = _parse_gamma_settle(m)
                 if parsed is not None:
-                    out[parsed[0]] = parsed[1]
+                    cid, settles, close_at = parsed
+                    out[cid] = (settles, close_at)
             return
-        # Failure: split and retry, unless we're already small enough that
-        # further splitting just floods the API for no benefit.
         if len(batch) < GAMMA_MIN_BATCH:
             log.warning("gamma-api batch of %d failed, giving up on these ids", len(batch))
             return
@@ -180,9 +213,12 @@ def _close_position(
     settle_price: float,
     *,
     source: str,
+    closed_at: datetime | None = None,
 ) -> None:
     """Synthesize a 'sell' Trade row at settle_price and zero out the position.
-    `source` is just a label for the log line: 'gamma' vs 'heuristic'."""
+    `source` is just a label for the log line: 'gamma' vs 'heuristic'.
+    `closed_at` is the actual market resolution time; falls back to utcnow()
+    if not known (e.g., the heuristic path doesn't have this info)."""
     size = pos.size
     avg = pos.avg_price
     realized_delta = (settle_price - avg) * size
@@ -212,14 +248,15 @@ def _close_position(
         mode=mode,
         status="resolved",
         external_tx=None,
-        created_at=datetime.utcnow(),
+        created_at=closed_at if closed_at is not None else datetime.utcnow(),
     )
     db.add(synth)
     pos.realized_pnl_usd += realized_delta
     pos.size = 0.0
     log.info(
-        "resolved [%s] user=%s %s @%.4f size=%.2f cost_avg=%.4f pnl=%+.2f",
+        "resolved [%s] user=%s %s @%.4f size=%.2f cost_avg=%.4f pnl=%+.2f close_at=%s",
         source, user_id, pos.outcome, settle_price, size, avg, realized_delta,
+        closed_at.isoformat() if closed_at else "now",
     )
 
 
@@ -273,11 +310,18 @@ def check_resolutions(db: Session, user_id: int, mode: str = "paper") -> int:
     unresolved: list[tuple[Position, str]] = []
 
     for pos, asset in positions:
-        settles = gamma_resolved.get(pos.market_id)
-        if settles is None or asset not in settles:
+        entry = gamma_resolved.get(pos.market_id)
+        if entry is None:
             unresolved.append((pos, asset))
             continue
-        _close_position(db, user_id, mode, pos, asset, settles[asset], source="gamma")
+        settles, closed_at = entry
+        if asset not in settles:
+            unresolved.append((pos, asset))
+            continue
+        _close_position(
+            db, user_id, mode, pos, asset, settles[asset],
+            source="gamma", closed_at=closed_at,
+        )
         closed += 1
 
     if not unresolved:

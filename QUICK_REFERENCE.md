@@ -98,17 +98,35 @@ Mental-model notes:
 
 ## Running the bot
 
+I need **two PowerShell terminals open at the same time**. They do different things — don't confuse them.
+
+| Terminal | Command | What it does | If I close it |
+|---|---|---|---|
+| **A — the bot** | `.\.venv\Scripts\python.exe main.py` | Polls source wallets, runs risk checks, fires paper/live fills, writes to DB. **This is what takes trades.** | Bot dies. No new fills until I restart it. |
+| **B — the dashboard** | `.\.venv\Scripts\python.exe stats.py --watch` | Reads the DB and shows stats on screen, refreshes every 5s. Pure viewer. | Nothing breaks. Trades keep firing. I just can't see them until I reopen it. |
+
 ```powershell
 cd "C:\Users\e4gra\OneDrive\Desktop\Claude Code Test\backend"
 
-# start the server (bot runs inside it)
+# TERMINAL A — the bot itself (must stay open for trades to fire)
 .\.venv\Scripts\python.exe main.py
 
-# in a SECOND PowerShell window, watch the dashboard
+# TERMINAL B (separate window) — the dashboard (optional viewer)
 .\.venv\Scripts\python.exe stats.py --watch
 ```
 
-Bot keeps running as long as the server window stays open. Closing PowerShell or shutting down the PC kills it. DB persists; on restart the bot auto-resumes.
+**Key rule:** the dashboard ≠ the bot. If trades stop, it's because `main.py` died, not because I closed the dashboard.
+
+Bot keeps running as long as the `main.py` terminal stays open. Closing PowerShell or shutting down the PC kills it. DB persists; on restart the bot auto-resumes.
+
+### Two ways to view the dashboard
+
+| Where | How | Needs |
+|---|---|---|
+| **In the terminal (CLI)** | `.\.venv\Scripts\python.exe stats.py --watch` | Nothing else — reads the DB directly. Works even if `main.py` is off. |
+| **In a browser (HTML, phone-friendly)** | Open `http://localhost:8000/dashboard` in any browser on the same machine | `main.py` must be running (it serves the page). |
+
+If the terminal dashboard looks like a wall of scrolling text, it's old refresh history piled up. Press **Ctrl+C**, run `cls`, then re-run `stats.py --watch` for a clean view. Make the terminal window tall so all the stats sections fit on one screen.
 
 ---
 
@@ -148,8 +166,8 @@ CLAUDE.md tells Claude to commit + push after every successful edit. So:
 ## Quick mental model when something looks broken
 
 1. **Dashboard shows old data?** → Restart `stats.py --watch` (Ctrl+C, re-run)
-2. **No new fills for a while?** → Could be source wallet went quiet, or Polymarket API hiccup. Check the latest fill timestamp. Most "stale" feelings are during overnight quiet hours.
-3. **Bot crashed?** → Check `bot_instances.last_error` in the DB or look at the server PowerShell window for traceback.
+2. **No new fills for a while?** → **First check: is `main.py` still running?** Open a terminal and run `tasklist | findstr python` — if you don't see a python process whose command line is `main.py`, the bot is dead. Restart it. (Closing the dashboard does NOT stop trades — only closing/crashing `main.py` does.) If `main.py` is alive but still no fills, it might be a quiet source wallet or a Polymarket API hiccup.
+3. **Bot crashed?** → The `main.py` terminal in Cursor will show a red error icon on the tab. Scroll up in that terminal for the Python traceback. Also check `bot_instances.last_error` in the DB.
 4. **Lost my .env / master key?** → All managed wallets are unrecoverable. Why I back the master key up to a password manager.
 5. **Pushed something I shouldn't have?** → `.gitignore` should prevent it. If a file made it through, `git rm --cached <file>` and add it to `.gitignore`.
 

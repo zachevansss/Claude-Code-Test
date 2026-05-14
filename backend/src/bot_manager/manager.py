@@ -149,6 +149,12 @@ class BotManager:
 
     async def _tick(self, user_id: int) -> None:
         with SessionLocal() as db:
+            # Liveness heartbeat: written every tick so the dashboard / health
+            # endpoint can detect a stalled coroutine. Done before any work so
+            # even a tick that early-returns (no wallets, no settings) still
+            # proves the loop is alive.
+            self._touch_tick(db, user_id)
+
             user_settings = (
                 db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
             )
@@ -178,8 +184,14 @@ class BotManager:
                 return
 
             tracker = self._get_tracker(db, user_id, [w.address for w in wallets])
-            signals = await tracker.poll()
+            try:
+                signals = await tracker.poll()
+            except Exception as e:  # noqa: BLE001
+                self._set_poll_status(db, user_id, f"poll error: {type(e).__name__}: {e}"[:240])
+                raise
+
             if not signals:
+                self._set_poll_status(db, user_id, "ok: no new signals")
                 return
 
             # DB-level dedupe — final safety net against double execution.
@@ -198,7 +210,14 @@ class BotManager:
 
             fresh = [s for s in signals if s.external_tx not in already_seen]
             if not fresh:
+                self._set_poll_status(
+                    db, user_id,
+                    f"ok: {len(signals)} signal(s) all dedup'd"
+                )
                 return
+
+            self._set_poll_status(db, user_id, f"ok: {len(fresh)} fresh signal(s)")
+            self._touch_signal(db, user_id)
 
             # Reconcile any open live orders against the CLOB before computing
             # exposure or sizing new orders. Failures here are non-fatal — we
@@ -338,6 +357,42 @@ class BotManager:
             if inst:
                 inst.last_error = msg[:512]
                 db.commit()
+
+    # --- liveness telemetry ------------------------------------------------
+    # These three helpers update bot_instances columns so the dashboard and
+    # /health endpoint can detect a stalled tracker. Each opens its own short
+    # transaction inside the shared tick session — failures are swallowed
+    # (telemetry must never crash the tick).
+
+    @staticmethod
+    def _touch_tick(db: Session, user_id: int) -> None:
+        try:
+            inst = db.query(BotInstance).filter(BotInstance.user_id == user_id).first()
+            if inst:
+                inst.last_tick_at = datetime.utcnow()
+                db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+
+    @staticmethod
+    def _touch_signal(db: Session, user_id: int) -> None:
+        try:
+            inst = db.query(BotInstance).filter(BotInstance.user_id == user_id).first()
+            if inst:
+                inst.last_signal_emitted_at = datetime.utcnow()
+                db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+
+    @staticmethod
+    def _set_poll_status(db: Session, user_id: int, status: str) -> None:
+        try:
+            inst = db.query(BotInstance).filter(BotInstance.user_id == user_id).first()
+            if inst:
+                inst.last_poll_status = status[:256]
+                db.commit()
+        except Exception:  # noqa: BLE001
+            db.rollback()
 
 
 bot_manager = BotManager()

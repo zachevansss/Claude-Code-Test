@@ -67,6 +67,18 @@ def _paper_balance(db: Session, user_id: int, starting_bankroll: float) -> float
 
 RESOLUTION_INTERVAL_SECONDS = 60
 
+# Hard upper bound on a single tracker.poll() call. The tracker's httpx client
+# already has per-request timeouts (10s read, 5s connect), but stacked retries
+# or pool-level stalls can still exceed that — this is the outer guardrail.
+POLL_DEADLINE_SECONDS = 30
+
+# If no fresh signal has been emitted in this long while the bot is "running",
+# we assume the tracker has gotten into a wedged-pool state and force a rebuild
+# (next tick will construct a fresh WalletTracker + httpx client). False
+# positives just mean an extra tracker init — harmless. Threshold is generous
+# because the source wallet can legitimately be quiet for hours.
+SIGNAL_STALL_REBUILD_SECONDS = 2 * 3600
+
 
 class BotManager:
     def __init__(self) -> None:
@@ -75,6 +87,9 @@ class BotManager:
         # Per-user timestamp of the last resolution sweep. Throttles the
         # checker so we don't spam Polymarket every 5-second tick.
         self._last_resolution: dict[int, float] = {}
+        # Per-user timestamp of the last forced tracker rebuild (stall recovery).
+        # Cooldown to avoid thrashing when the source wallet is genuinely quiet.
+        self._last_rebuild_at: dict[int, datetime] = {}
 
     async def start(self, user_id: int) -> None:
         existing = self._tasks.get(user_id)
@@ -155,6 +170,11 @@ class BotManager:
             # proves the loop is alive.
             self._touch_tick(db, user_id)
 
+            # If the tracker has gone silent for too long while the loop is
+            # alive, assume httpx pool stall and drop the cached tracker so
+            # the next _get_tracker() rebuilds it with a fresh client.
+            self._rebuild_tracker_if_stalled(db, user_id)
+
             user_settings = (
                 db.query(UserSettings).filter(UserSettings.user_id == user_id).first()
             )
@@ -185,7 +205,24 @@ class BotManager:
 
             tracker = self._get_tracker(db, user_id, [w.address for w in wallets])
             try:
-                signals = await tracker.poll()
+                signals = await asyncio.wait_for(
+                    tracker.poll(), timeout=POLL_DEADLINE_SECONDS
+                )
+            except asyncio.TimeoutError:
+                # A single poll hanging past the deadline is treated as a
+                # wedged client — drop the tracker so the next tick rebuilds
+                # with a fresh httpx pool. Don't re-raise: the bot loop should
+                # keep ticking; this is a *handled* stall, not a crash.
+                self._trackers.pop(user_id, None)
+                self._set_poll_status(
+                    db, user_id,
+                    f"poll error: timeout after {POLL_DEADLINE_SECONDS}s — tracker rebuilding",
+                )
+                log.warning(
+                    "tracker.poll() exceeded %ds for user=%s — rebuilding",
+                    POLL_DEADLINE_SECONDS, user_id,
+                )
+                return
             except Exception as e:  # noqa: BLE001
                 self._set_poll_status(db, user_id, f"poll error: {type(e).__name__}: {e}"[:240])
                 raise
@@ -393,6 +430,35 @@ class BotManager:
                 db.commit()
         except Exception:  # noqa: BLE001
             db.rollback()
+
+    def _rebuild_tracker_if_stalled(self, db: Session, user_id: int) -> None:
+        """If the tracker hasn't emitted a fresh signal in
+        SIGNAL_STALL_REBUILD_SECONDS, drop the cached instance so the next
+        _get_tracker() rebuilds it with a fresh httpx pool. Cooldown via
+        `_last_rebuild_at` prevents thrashing once the threshold is crossed
+        (e.g. if the source wallet stays quiet for days)."""
+        if user_id not in self._trackers:
+            return
+        now = datetime.utcnow()
+        last_rebuild = self._last_rebuild_at.get(user_id)
+        if last_rebuild and (now - last_rebuild).total_seconds() < SIGNAL_STALL_REBUILD_SECONDS:
+            return
+        try:
+            inst = db.query(BotInstance).filter(BotInstance.user_id == user_id).first()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            return
+        if not inst or not inst.last_signal_emitted_at:
+            return
+        age = (now - inst.last_signal_emitted_at).total_seconds()
+        if age < SIGNAL_STALL_REBUILD_SECONDS:
+            return
+        log.warning(
+            "no fresh signal in %.0fm for user=%s — rebuilding tracker (httpx pool refresh)",
+            age / 60, user_id,
+        )
+        self._trackers.pop(user_id, None)
+        self._last_rebuild_at[user_id] = now
 
 
 bot_manager = BotManager()

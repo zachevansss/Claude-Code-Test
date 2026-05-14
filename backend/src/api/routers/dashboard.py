@@ -45,6 +45,10 @@ def _colorize_inline(escaped: str) -> str:
     escaped = escaped.replace("● STOPPED", '<span class="warn">● STOPPED</span>')
     escaped = re.sub(r"\bWON\b", '<span class="pos">WON</span>', escaped)
     escaped = re.sub(r"\bLOST\b", '<span class="neg">LOST</span>', escaped)
+    # Health-line flags from the new bot-liveness banner.
+    escaped = escaped.replace("⚠", '<span class="neg">⚠</span>')
+    escaped = re.sub(r"\b(error:)", r'<span class="neg">\1</span>', escaped)
+    escaped = re.sub(r"\b(poll error)", r'<span class="neg">\1</span>', escaped)
     return escaped
 
 

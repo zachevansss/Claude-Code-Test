@@ -211,6 +211,32 @@ def _utc_iso_to_central_short(ts: str) -> str:
         return ts[5:16]
 
 
+def _age_seconds(ts: str | None) -> float | None:
+    """Seconds elapsed since the naive-UTC timestamp `ts`. None if unparseable
+    or missing. Used by the health banner to flag stale tick/signal columns."""
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt_age(seconds: float | None) -> str:
+    """Compact age string: '4s', '12m', '3h', '2d', or '—' for never."""
+    if seconds is None:
+        return "—"
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
 def compute_daily_pnl(con: sqlite3.Connection, mode: str) -> dict[date, dict]:
     """Replay trades chronologically and bucket realized PnL by calendar day.
 
@@ -331,9 +357,19 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     ) = settings
 
     bot = cur.execute(
-        "SELECT status, last_started_at, last_error FROM bot_instances LIMIT 1"
+        "SELECT status, last_started_at, last_error, last_tick_at,"
+        " last_signal_emitted_at, last_poll_status"
+        " FROM bot_instances LIMIT 1"
     ).fetchone()
-    bot_status = bot[0] if bot else "(no bot record)"
+    if bot:
+        bot_status = bot[0]
+        last_tick_at = bot[3]
+        last_signal_at = bot[4]
+        last_poll_status = bot[5]
+        last_err = bot[2]
+    else:
+        bot_status = "(no bot record)"
+        last_tick_at = last_signal_at = last_poll_status = last_err = None
 
     fills = cur.execute(
         "SELECT COUNT(*), COALESCE(SUM(notional_usd),0), COALESCE(AVG(notional_usd),0),"
@@ -411,13 +447,69 @@ def render(con: sqlite3.Connection, mode: str = "paper", skip_prices: bool = Fal
     # Build each section as its own list of lines first, then compose layout.
     LEFT_W = 44
 
-    # ── Banner ──
-    status_color = "green" if bot_status == "running" else "yellow"
+    # ── Banner + Health ──
+    # Status colour: green when DB row says running AND tick is fresh, yellow
+    # for stopped/unknown, red when the bot row says running but no tick has
+    # landed recently (tick coroutine dead) or there's a stale last_error.
+    tick_age = _age_seconds(last_tick_at)
+    sig_age = _age_seconds(last_signal_at)
+    tick_stale = bot_status == "running" and (tick_age is None or tick_age > 30)
+    # Signal staleness only meaningful while running. >1h = warn (tracker may
+    # be blind or source quiet), >4h while running = red (very likely tracker
+    # stall — even a quiet source should produce something every few hours).
+    sig_warn = bot_status == "running" and sig_age is not None and sig_age > 3600
+    sig_critical = bot_status == "running" and sig_age is not None and sig_age > 14400
+
+    if bot_status != "running":
+        status_color = "yellow"
+    elif tick_stale or last_err:
+        status_color = "red"
+    elif sig_critical:
+        status_color = "red"
+    elif sig_warn:
+        status_color = "yellow"
+    else:
+        status_color = "green"
+
     banner = [
         f"{c('bold')}{c('cyan')}═══ POLYMARKET COPY-TRADE BOT ═══{c('reset')}  "
         f"{c('dim')}{run_mode.upper()}{c('reset')}  "
         f"{c(status_color)}● {bot_status.upper()}{c('reset')}"
     ]
+
+    # Health line. Always shown when the bot row exists, so a healthy bot is
+    # also confirmed visually (not just "no error means fine"). Red ⚠ flags
+    # call attention to stale tick (loop dead) or stale signal (likely stall).
+    if bot is not None:
+        tick_part_color = "red" if tick_stale else "dim"
+        if sig_critical:
+            sig_part_color = "red"
+        elif sig_warn:
+            sig_part_color = "yellow"
+        else:
+            sig_part_color = "dim"
+        warn_flag = ""
+        if tick_stale or sig_critical:
+            warn_flag = f"{c('red')}{c('bold')}⚠ {c('reset')}"
+        elif sig_warn:
+            warn_flag = f"{c('yellow')}{c('bold')}⚠ {c('reset')}"
+        poll_str = last_poll_status or "—"
+        # If poll status starts with "poll error" highlight it red.
+        if last_poll_status and last_poll_status.startswith("poll error"):
+            poll_str = f"{c('red')}{last_poll_status}{c('reset')}"
+        else:
+            poll_str = f"{c('dim')}{last_poll_status or '—'}{c('reset')}"
+        health_line = (
+            f"  {warn_flag}health: "
+            f"{c('dim')}tick{c('reset')} {c(tick_part_color)}{_fmt_age(tick_age)}{c('reset')} · "
+            f"{c('dim')}signal{c('reset')} {c(sig_part_color)}{_fmt_age(sig_age)}{c('reset')} · "
+            f"{poll_str}"
+        )
+        banner.append(health_line)
+        if last_err:
+            banner.append(
+                f"  {c('red')}{c('bold')}error:{c('reset')} {c('red')}{last_err[:200]}{c('reset')}"
+            )
 
     # ── Account ──
     account = [heading("account", width=LEFT_W)]

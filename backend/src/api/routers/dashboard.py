@@ -305,7 +305,7 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
   .cal-cell {
     aspect-ratio: 1;
     border-radius: 8px;
-    padding: 6px;
+    padding: 6px 6px 4px;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
@@ -322,16 +322,26 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
     font-weight: 600;
   }
   .cal-cell.today .cal-day { color: var(--accent); }
-  .cal-pnl {
-    font-size: 11px;
-    font-weight: 700;
+  .cal-nums {
     text-align: right;
-    line-height: 1.2;
+    line-height: 1.15;
+  }
+  .cal-pnl {
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .cal-pct {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--text-3);
+    margin-top: 1px;
   }
   .cal-cell.pos { background: var(--pos-soft); }
   .cal-cell.neg { background: var(--neg-soft); }
-  .cal-cell.pos .cal-pnl { color: var(--pos); }
-  .cal-cell.neg .cal-pnl { color: var(--neg); }
+  .cal-cell.pos .cal-pnl,
+  .cal-cell.pos .cal-pct { color: var(--pos); }
+  .cal-cell.neg .cal-pnl,
+  .cal-cell.neg .cal-pct { color: var(--neg); }
 
   /* ───── Performance card ───── */
   .perf-grid {
@@ -447,6 +457,29 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   td.pos { color: var(--pos); font-weight: 600; }
   td.neg { color: var(--neg); font-weight: 600; }
+
+  /* ───── Scrollable lists (positions table, fills, resolutions, winners/losers) ───── */
+  .scroll-list {
+    max-height: 560px;
+    overflow-y: auto;
+    /* visible scrollbar feel — dim track so it doesn't dominate */
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .scroll-list::-webkit-scrollbar { width: 8px; height: 8px; }
+  .scroll-list::-webkit-scrollbar-track { background: transparent; }
+  .scroll-list::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 4px;
+  }
+  .scroll-list::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+  /* keep table header pinned while body scrolls */
+  .scroll-list table thead th {
+    position: sticky;
+    top: 0;
+    background: var(--card);
+    z-index: 1;
+  }
 
   /* ───── Activity feed ───── */
   .feed { display: flex; flex-direction: column; gap: 12px; }
@@ -740,13 +773,21 @@ function renderCalendar(data) {
     if (d.is_today) cls += " today";
     if (d.has_activity && d.realized > 0) cls += " pos has-activity";
     else if (d.has_activity && d.realized < 0) cls += " neg has-activity";
-    const pnlText = d.has_activity
-      ? (d.realized > 0 ? "+" : "") + d.realized.toFixed(0)
-      : "";
+    let pnlText = "";
+    let pctText = "";
+    if (d.has_activity) {
+      const sign = d.realized > 0 ? "+" : (d.realized < 0 ? "-" : "");
+      pnlText = sign + "$" + Math.abs(d.realized).toFixed(2);
+      const pctSign = d.pct > 0 ? "+" : "";
+      pctText = pctSign + d.pct.toFixed(2) + "%";
+    }
     return `
       <div class="${cls}" title="${escapeHtml(d.date)}: ${fmtMoneySigned(d.realized)} (${fmtPct(d.pct)})">
         <div class="cal-day">${d.day}</div>
-        <div class="cal-pnl mono num">${pnlText}</div>
+        <div class="cal-nums">
+          <div class="cal-pnl mono num">${pnlText}</div>
+          <div class="cal-pct mono num">${pctText}</div>
+        </div>
       </div>`;
   })).join("");
   return `
@@ -846,7 +887,8 @@ function renderOpenPositions(data) {
       </div>
     `;
   }
-  const rows = positions.slice(0, 12).map(p => {
+  // Show all — scroll for the rest after ~10 fit in view.
+  const rows = positions.map(p => {
     const ret = p.return_pct;
     const cls = ret !== null ? (ret > 0 ? "pos" : "neg") : "";
     const retStr = ret !== null ? fmtPct(ret) : "—";
@@ -868,20 +910,22 @@ function renderOpenPositions(data) {
     <div class="card">
       <div class="card-head">
         <div class="card-title">Open positions</div>
-        <div class="card-meta">${positions.length} total · showing top ${Math.min(12, positions.length)}</div>
+        <div class="card-meta">${positions.length} total · scroll for more</div>
       </div>
-      <table>
-        <thead>
-          <tr>
-            <th>Market</th>
-            <th class="right">Cost</th>
-            <th class="right">Value</th>
-            <th class="right">P&amp;L</th>
-            <th class="right">Return</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
+      <div class="scroll-list">
+        <table>
+          <thead>
+            <tr>
+              <th>Market</th>
+              <th class="right">Cost</th>
+              <th class="right">Value</th>
+              <th class="right">P&amp;L</th>
+              <th class="right">Return</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
     </div>
   `;
 }
@@ -911,8 +955,8 @@ function renderActivity(data, kind) {
     }).join("");
     return `
       <div class="card">
-        <div class="card-head"><div class="card-title">Recent fills</div><div class="card-meta">${fills.length} shown</div></div>
-        <div class="feed">${rows}</div>
+        <div class="card-head"><div class="card-title">Recent fills</div><div class="card-meta">${fills.length} loaded · scroll for more</div></div>
+        <div class="scroll-list"><div class="feed">${rows}</div></div>
       </div>
     `;
   } else {
@@ -941,8 +985,8 @@ function renderActivity(data, kind) {
     }).join("");
     return `
       <div class="card">
-        <div class="card-head"><div class="card-title">Recent resolutions</div><div class="card-meta">${rs.length} shown</div></div>
-        <div class="feed">${rows}</div>
+        <div class="card-head"><div class="card-title">Recent resolutions</div><div class="card-meta">${rs.length} loaded · scroll for more</div></div>
+        <div class="scroll-list"><div class="feed">${rows}</div></div>
       </div>
     `;
   }
@@ -966,10 +1010,11 @@ function renderWinnersLosers(data) {
         </div>
       `;
     }).join("");
+    // ~5 rows visible by default; scroll for the rest.
     return `
       <div class="card">
-        <div class="card-head"><div class="card-title">${title}</div></div>
-        <div class="feed">${list}</div>
+        <div class="card-head"><div class="card-title">${title}</div><div class="card-meta">${rows.length} loaded · scroll for more</div></div>
+        <div class="scroll-list" style="max-height: 360px;"><div class="feed">${list}</div></div>
       </div>
     `;
   };
@@ -1060,16 +1105,20 @@ function drawPnlChart(data) {
         tension: 0.3,
         borderWidth: 2,
         pointRadius: 0,
-        pointHoverRadius: 4,
+        pointHoverRadius: 5,
         pointHoverBackgroundColor: color,
+        pointHoverBorderColor: "#0a0e15",
+        pointHoverBorderWidth: 2,
       }],
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
       plugins: {
         legend: { display: false },
         tooltip: {
+          enabled: true,
           backgroundColor: "#161b22",
           borderColor: "#30363d",
           borderWidth: 1,
@@ -1078,6 +1127,7 @@ function drawPnlChart(data) {
           padding: 12,
           displayColors: false,
           callbacks: {
+            title: (items) => items[0].label,
             label: (ctx) => "$" + ctx.parsed.y.toFixed(2),
           },
         },
@@ -1107,7 +1157,6 @@ function drawSparkChart(data) {
   if (sparkChart) { sparkChart.destroy(); sparkChart = null; }
   // Last 30 days for the hero sparkline.
   const recent = data.pnl_timeline.slice(-30);
-  const last = recent[recent.length - 1]?.y ?? 0;
   const color = data.account.total_pnl >= 0 ? "#3fb950" : "#f85149";
   sparkChart = new Chart(ctx, {
     type: "line",
@@ -1121,12 +1170,33 @@ function drawSparkChart(data) {
         tension: 0.35,
         borderWidth: 2,
         pointRadius: 0,
+        pointHoverRadius: 5,
+        pointHoverBackgroundColor: color,
+        pointHoverBorderColor: "#0a0e15",
+        pointHoverBorderWidth: 2,
       }],
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      plugins: { legend: { display: false }, tooltip: { enabled: false } },
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          enabled: true,
+          backgroundColor: "#161b22",
+          borderColor: "#30363d",
+          borderWidth: 1,
+          titleColor: "#e6edf3",
+          bodyColor: "#e6edf3",
+          padding: 10,
+          displayColors: false,
+          callbacks: {
+            title: (items) => items[0].label,
+            label: (ctx) => "$" + ctx.parsed.y.toFixed(2),
+          },
+        },
+      },
       scales: { x: { display: false }, y: { display: false } },
     },
   });

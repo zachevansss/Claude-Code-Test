@@ -227,6 +227,8 @@ def compute_dashboard_data(
         })
 
     # --- biggest winners ($) and losers ($) ---
+    # Pull more rows than the dashboard displays at first — the front-end
+    # caps the initial visible count and lets the user scroll for the rest.
     winners_dollar_rows = cur.execute(
         "SELECT p.outcome, p.realized_pnl_usd, p.updated_at, p.avg_price,"
         " (SELECT t.price FROM trades t WHERE t.user_id=p.user_id"
@@ -236,7 +238,7 @@ def compute_dashboard_data(
         "    AND t.market_id=p.market_id AND t.outcome=p.outcome"
         "    AND t.mode=p.mode AND t.title IS NOT NULL LIMIT 1) AS title"
         " FROM positions p WHERE p.mode = ? AND p.realized_pnl_usd > 0"
-        " ORDER BY p.realized_pnl_usd DESC LIMIT 5",
+        " ORDER BY p.realized_pnl_usd DESC LIMIT 200",
         (mode,),
     ).fetchall()
     losers_dollar_rows = cur.execute(
@@ -248,7 +250,7 @@ def compute_dashboard_data(
         "    AND t.market_id=p.market_id AND t.outcome=p.outcome"
         "    AND t.mode=p.mode AND t.title IS NOT NULL LIMIT 1) AS title"
         " FROM positions p WHERE p.mode = ? AND p.realized_pnl_usd < 0"
-        " ORDER BY p.realized_pnl_usd ASC LIMIT 5",
+        " ORDER BY p.realized_pnl_usd ASC LIMIT 200",
         (mode,),
     ).fetchall()
 
@@ -287,16 +289,16 @@ def compute_dashboard_data(
     winners_pct = sorted(
         [c for c in closed_with_ret if (c["return_pct"] or 0) > 0],
         key=lambda c: -(c["return_pct"] or 0),
-    )[:5]
+    )[:200]
 
-    # --- recent resolutions (last 8) ---
+    # --- recent resolutions (most recent first, capped at 500) ---
     resolutions_rows = cur.execute(
         "SELECT t.created_at, t.outcome, t.title, t.price, t.size,"
         " (SELECT p.realized_pnl_usd FROM positions p"
         "    WHERE p.user_id=t.user_id AND p.market_id=t.market_id"
         "      AND p.outcome=t.outcome AND p.mode=t.mode) AS pnl"
         " FROM trades t WHERE t.mode = ? AND t.status = 'resolved'"
-        " ORDER BY t.id DESC LIMIT 8",
+        " ORDER BY t.id DESC LIMIT 500",
         (mode,),
     ).fetchall()
     resolutions = [
@@ -312,10 +314,10 @@ def compute_dashboard_data(
         for ts, outcome, title, price, size, pnl in resolutions_rows
     ]
 
-    # --- recent fills (last 12) ---
+    # --- recent fills (most recent first, capped at 500) ---
     fills_rows = cur.execute(
         "SELECT created_at, side, outcome, title, price, size, notional_usd, status"
-        " FROM trades WHERE mode = ? ORDER BY id DESC LIMIT 12",
+        " FROM trades WHERE mode = ? ORDER BY id DESC LIMIT 500",
         (mode,),
     ).fetchall()
     recent_fills = [

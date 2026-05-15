@@ -215,8 +215,23 @@ def compute_dashboard_data(
         cal_days.append(week_row)
 
     # Cumulative PnL timeline (running sum over all days, daily-pnl-replay style).
+    # Includes `account_value = starting_bankroll + cumulative_pnl` so the hero
+    # sparkline can plot total portfolio value directly. Prepends a synthetic
+    # day-before-first-activity anchor at exactly starting_bankroll so the chart
+    # starts visually at the user's initial bankroll instead of jumping in
+    # mid-history.
     timeline_sorted = sorted(daily.items())
     timeline: list[dict] = []
+    if timeline_sorted:
+        from datetime import timedelta as _td
+        first_day = timeline_sorted[0][0]
+        anchor_day = first_day - _td(days=1)
+        timeline.append({
+            "date": anchor_day.isoformat(),
+            "cumulative_pnl": 0.0,
+            "daily_realized": 0.0,
+            "account_value": round(starting_bankroll, 2),
+        })
     running = 0.0
     for d, info in timeline_sorted:
         running += info["realized"]
@@ -224,6 +239,7 @@ def compute_dashboard_data(
             "date": d.isoformat(),
             "cumulative_pnl": round(running, 2),
             "daily_realized": round(info["realized"], 2),
+            "account_value": round(starting_bankroll + running, 2),
         })
 
     # --- biggest winners ($) and losers ($) ---

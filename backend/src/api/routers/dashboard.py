@@ -755,7 +755,7 @@ function renderPnlChart(data) {
   return `
     <div class="card">
       <div class="card-head">
-        <div class="card-title">Cumulative P&amp;L</div>
+        <div class="card-title">Cumulative P&amp;L · gain alone (excludes starting bankroll)</div>
         <div class="card-meta">${data.pnl_timeline.length} days · all-time</div>
       </div>
       <div id="pnl-chart-wrap"><canvas id="pnl-chart"></canvas></div>
@@ -1155,15 +1155,17 @@ function drawSparkChart(data) {
   const ctx = document.getElementById("spark-chart");
   if (!ctx) return;
   if (sparkChart) { sparkChart.destroy(); sparkChart = null; }
-  // Last 30 days for the hero sparkline.
-  const recent = data.pnl_timeline.slice(-30);
+  // Hero chart shows full account-value timeline (starting bankroll + cumulative
+  // realized PnL). Anchored at the day before the first trade so it visually
+  // starts at the bankroll, not mid-history.
+  const timeline = data.pnl_timeline;
   const color = data.account.total_pnl >= 0 ? "#3fb950" : "#f85149";
   sparkChart = new Chart(ctx, {
     type: "line",
     data: {
-      labels: recent.map(p => p.date),
+      labels: timeline.map(p => p.date),
       datasets: [{
-        data: recent.map(p => p.cumulative_pnl),
+        data: timeline.map(p => p.account_value),
         borderColor: color,
         backgroundColor: color + "20",
         fill: true,
@@ -1193,7 +1195,7 @@ function drawSparkChart(data) {
           displayColors: false,
           callbacks: {
             title: (items) => items[0].label,
-            label: (ctx) => "$" + ctx.parsed.y.toFixed(2),
+            label: (ctx) => "Account value: $" + ctx.parsed.y.toFixed(2),
           },
         },
       },

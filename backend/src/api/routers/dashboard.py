@@ -665,14 +665,18 @@ const escapeHtml = (s) => {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
 };
-// Browser's detected timezone — exposed in the health footer for easy
-// debugging when timestamps look wrong.
+// Force all timestamps into America/Chicago regardless of what the browser
+// thinks its local timezone is. NordVPN's Finland exit makes Windows
+// auto-detect timezone as Helsinki (UTC+3), which leaks into the browser via
+// Intl. Pinning to Central here matches the operator's actual location.
+const DISPLAY_TZ = "America/Chicago";
 const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown";
 
 const fmtTime = (isoUtc) => {
   if (!isoUtc) return "—";
   const d = new Date(isoUtc);
   return d.toLocaleString("en-US", {
+    timeZone: DISPLAY_TZ,
     month: "numeric", day: "numeric",
     hour: "numeric", minute: "2-digit",
     hour12: true,
@@ -1066,7 +1070,7 @@ function renderHealth(data) {
       </div>
       <div class="health-item">
         <span class="lbl">Times shown in:</span>
-        <span class="val">${escapeHtml(BROWSER_TZ)}</span>
+        <span class="val">${escapeHtml(DISPLAY_TZ)}${BROWSER_TZ !== DISPLAY_TZ ? ` (browser is ${escapeHtml(BROWSER_TZ)})` : ""}</span>
       </div>
       ${b.last_error ? `<div class="health-error">⚠ ${escapeHtml(b.last_error)}</div>` : ""}
     </div>

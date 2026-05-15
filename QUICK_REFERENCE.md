@@ -6,7 +6,7 @@ A condensed cheat-sheet for **what this project is, how it fits together, and th
 
 ## What the project does (one paragraph)
 
-A Polymarket copy-trading bot. I point it at a source wallet on Polymarket, and the bot mirrors that wallet's trades into my own (paper or live) account, with risk caps so it can't blow up. It runs in the background while my PC is on, fills as the source fills, auto-closes positions when markets resolve, and produces a live dashboard I can watch.
+A Polymarket copy-trading bot. I point it at a source wallet on Polymarket, and the bot mirrors that wallet's trades into my own (paper or live) account, with risk caps so it can't blow up. **It runs 24/7 on a Hetzner VPS in Helsinki** (`204.168.246.106`) as a systemd service called `copytrade`. The local Windows machine is no longer the bot's home — it's just where I look at the dashboard from. The bot fills as the source fills, auto-closes positions when markets resolve, and produces a live dashboard I can watch over Tailscale at `http://100.107.39.71:8000/dashboard`.
 
 ---
 
@@ -36,7 +36,7 @@ Claude Code Test/                 ← project root
 | **QUICK_REFERENCE.md** | This doc — for me. |
 | **.gitignore** | Lists files git should never push. Includes `.env`, `copytrade.db`, `.venv/`. Without this, secrets and personal data would leak to GitHub. |
 | **.env** | My local secrets. Never pushed (it's in .gitignore). |
-| **copytrade.db** | All trade/position history. Never pushed (also gitignored). |
+| **copytrade.db** | All trade/position history. Never pushed (also gitignored). **The local file is a frozen snapshot from migration day (2026-05-14).** The live DB lives on the VPS at `/root/copytrade/backend/copytrade.db`. |
 
 ---
 
@@ -61,14 +61,17 @@ These are the four outside services the bot leans on (in order of how essential 
 | **Polygon** | The Layer-2 blockchain Polymarket runs on. Everything on-chain — my proxy wallet, pUSD balance, the CTF Exchange v2 contract, conditional outcome tokens — lives here. Polygon mainnet is chain ID 137. | This is the substrate, not a thing I sign up for. The bot reads my pUSD balance from a Polygon address, sends approve/transfer txs to Polygon contracts, and submits orders that ultimately settle on Polygon. `POLYGON_CHAIN_ID=137` in `.env` pins it. |
 | **Alchemy** | A blockchain RPC provider — basically a "phone line" to Polygon. I have a free-tier account; their free quota (≈300M compute units/month) is far more than one bot needs. | My private RPC URL lives in `.env` as `POLYGON_RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/<key>`. Every module that touches Polygon — `wallet/balances.py`, `wallet/approvals.py`, `executor/engine.py` — reads it via `settings.polygon_rpc_url`. The free public endpoint (`polygon-rpc.com`) started returning 401s, so a paid-tier provider is required to talk to Polygon at all. |
 | **NordVPN** | Commercial VPN service. I use the Finland endpoint when I open Polymarket in my browser. | **Not integrated in code.** Polymarket geoblocks the US *website*, but `clob.polymarket.com` and `data-api.polymarket.com` (the APIs the bot calls) aren't geoblocked, so the bot itself doesn't need a VPN. The VPN matters when *I* log in to deposit, withdraw, or check the UI. Will become relevant for the VPS only if Hetzner's IP block ends up Polymarket-restricted. |
-| **Hetzner VPS** | Cheap European VPS provider (typically €4–8/month for a CX11 / CPX11 box). | **Not yet provisioned.** Planned home for the bot to run 24/7 instead of inside my PowerShell window. `backend/deploy/install.sh` and `backend/deploy/launch.md` are the scripts I'll run on the VPS at cutover — they set up systemd + the .env + the venv. Once migrated, the SQLite DB and `.env` live on the VPS, and my PC stops being the bot's home. |
+| **Hetzner VPS** | Cheap European VPS provider (typically €4–8/month for a CX11 / CPX22 box). | **ACTIVE.** Provisioned 2026-05-09, bot migrated 2026-05-14. CX22 box in Helsinki, Ubuntu 24.04. Public IPv4 `204.168.246.106`. Bot runs as the `copytrade` systemd service from `/root/copytrade/backend/`. Logs at `/root/copytrade/backend/logs/bot.log` (rotating). Migration was forced by my PC's sleep cycles pausing the bot when I was away. |
+| **Tailscale** | Zero-config mesh VPN that gives my PC and VPS private `100.x.x.x` addresses they can reach each other on, no matter what network I'm on. Free for personal use. | Installed on PC and VPS 2026-05-15. The VPS's Tailscale IP is `100.107.39.71` — that's the address I use for the dashboard now, *not* the public `204.168.246.106`. `ufw` on the VPS only allows port 8000 from Tailscale's `100.64.0.0/10` range, so the dashboard isn't reachable from the open internet. Works from any device I install Tailscale on (PC, phone, anywhere). |
 
 Mental-model notes:
 
 - **Polygon ≠ Polymarket.** Polymarket is the platform (UI, order book, CLOB API). Polygon is the chain underneath where everything actually settles. Alchemy lets me *read and write* Polygon; it has nothing to do with Polymarket directly.
 - **Alchemy is mission-critical even in paper mode.** `GET /wallet` reads pUSD over Alchemy. If the key dies or my quota runs out, the wallet endpoint returns `balance_error` and the UI shows $0.
 - **The VPN is for me, not the bot.** The bot's HTTPS calls to Polymarket's APIs work from any IP. So the bot can run on a US VPS, a Hetzner box, or my laptop without a VPN.
-- **Hetzner is the destination, not the present.** Right now the bot runs on this Windows box while it's on. The VPS migration is a separate going-live step.
+- **The bot lives on the VPS now, not my PC.** Closing PowerShell, putting my PC to sleep, even shutting it down — none of that affects the bot. It keeps polling, sizing, filling.
+- **Tailscale ≠ NordVPN.** They both run at the same time without conflict. Tailscale handles only `100.x.x.x` traffic (PC ↔ VPS); NordVPN handles everything else (Polymarket browsing). Windows routes by specificity, so the more-specific Tailscale route wins for dashboard traffic.
+- **NordVPN's *browser extension* will still try to intercept the dashboard URL** (the network bypass is at a different layer). Either whitelist the dashboard IP in the extension, use a different browser for it, or use an Incognito/InPrivate window (extensions are off there by default).
 
 ---
 
@@ -98,35 +101,48 @@ Mental-model notes:
 
 ## Running the bot
 
-I need **two PowerShell terminals open at the same time**. They do different things — don't confuse them.
+**I don't have to run anything to keep the bot alive.** It runs on the VPS as a systemd service that auto-starts on boot and auto-restarts on crash. My PC's role is now just *viewing*, not *hosting*. Closing every terminal on my Windows machine has zero effect on whether trades fire.
 
-| Terminal | Command | What it does | If I close it |
-|---|---|---|---|
-| **A — the bot** | `.\.venv\Scripts\python.exe main.py` | Polls source wallets, runs risk checks, fires paper/live fills, writes to DB. **This is what takes trades.** | Bot dies. No new fills until I restart it. |
-| **B — the dashboard** | `.\.venv\Scripts\python.exe stats.py --watch` | Reads the DB and shows stats on screen, refreshes every 5s. Pure viewer. | Nothing breaks. Trades keep firing. I just can't see them until I reopen it. |
+### Viewing the dashboard
 
-```powershell
-cd "C:\Users\e4gra\OneDrive\Desktop\Claude Code Test\backend"
+Just open a browser to:
 
-# TERMINAL A — the bot itself (must stay open for trades to fire)
-.\.venv\Scripts\python.exe main.py
-
-# TERMINAL B (separate window) — the dashboard (optional viewer)
-.\.venv\Scripts\python.exe stats.py --watch
+```
+http://100.107.39.71:8000/dashboard
 ```
 
-**Key rule:** the dashboard ≠ the bot. If trades stop, it's because `main.py` died, not because I closed the dashboard.
+That's the VPS reached via its Tailscale IP. Works from my PC, my phone (with Tailscale installed), anywhere I'm on Tailscale. Bookmark it.
 
-Bot keeps running as long as the `main.py` terminal stays open. Closing PowerShell or shutting down the PC kills it. DB persists; on restart the bot auto-resumes.
+**Caveat — NordVPN's browser extension:** if I get a "Squid error" page when loading the dashboard, that's NordVPN's Threat Protection intercepting at the browser level. Either disable the extension on that site, use Incognito/InPrivate (Ctrl+Shift+N), or use a different browser without the NordVPN extension. The network connection itself is fine (PowerShell `Invoke-WebRequest` to the URL works); it's purely a browser-extension issue.
 
-### Two ways to view the dashboard
+### Controlling the bot on the VPS
 
-| Where | How | Needs |
-|---|---|---|
-| **In the terminal (CLI)** | `.\.venv\Scripts\python.exe stats.py --watch` | Nothing else — reads the DB directly. Works even if `main.py` is off. |
-| **In a browser (HTML, phone-friendly)** | Open `http://localhost:8000/dashboard` in any browser on the same machine | `main.py` must be running (it serves the page). |
+SSH in first (from PowerShell):
 
-If the terminal dashboard looks like a wall of scrolling text, it's old refresh history piled up. Press **Ctrl+C**, run `cls`, then re-run `stats.py --watch` for a clean view. Make the terminal window tall so all the stats sections fit on one screen.
+```powershell
+ssh root@204.168.246.106
+```
+
+Then on the VPS:
+
+| Command | What it does |
+|---|---|
+| `systemctl status copytrade` | Is it running? Memory/CPU/uptime |
+| `systemctl restart copytrade` | Restart the bot (rarely needed) |
+| `systemctl stop copytrade` | Stop it. Only do this if I really mean it. |
+| `journalctl -u copytrade --no-pager --since "5 minutes ago" \| tail -50` | Recent log lines from systemd |
+| `tail -f /root/copytrade/backend/logs/bot.log` | Live log tail — better for watching trades flow in real time |
+| `curl -s http://localhost:8000/health` | Bot's own health JSON — same as the dashboard URL but compact |
+
+### What still works locally for legacy / offline viewing
+
+The local `backend/copytrade.db` is a **frozen snapshot from migration day**. I can still run `stats.py --watch` against it to see history *as of that snapshot* — but it doesn't update because no bot is writing to it. For the live picture, always use the browser dashboard URL above.
+
+```powershell
+# Optional — offline view of frozen local DB
+cd "C:\Users\e4gra\OneDrive\Desktop\Claude Code Test\backend"
+.\.venv\Scripts\python.exe stats.py --watch
+```
 
 ---
 
@@ -165,11 +181,13 @@ CLAUDE.md tells Claude to commit + push after every successful edit. So:
 
 ## Quick mental model when something looks broken
 
-1. **Dashboard shows old data?** → Restart `stats.py --watch` (Ctrl+C, re-run)
-2. **No new fills for a while?** → **First check: is `main.py` still running?** Open a terminal and run `tasklist | findstr python` — if you don't see a python process whose command line is `main.py`, the bot is dead. Restart it. (Closing the dashboard does NOT stop trades — only closing/crashing `main.py` does.) If `main.py` is alive but still no fills, it might be a quiet source wallet or a Polymarket API hiccup.
-3. **Bot crashed?** → The `main.py` terminal in Cursor will show a red error icon on the tab. Scroll up in that terminal for the Python traceback. Also check `bot_instances.last_error` in the DB.
-4. **Lost my .env / master key?** → All managed wallets are unrecoverable. Why I back the master key up to a password manager.
-5. **Pushed something I shouldn't have?** → `.gitignore` should prevent it. If a file made it through, `git rm --cached <file>` and add it to `.gitignore`.
+1. **Dashboard URL won't load in browser?** → First: does PowerShell `Invoke-WebRequest -Uri "http://100.107.39.71:8000/health"` succeed? If yes, the bot is fine and the browser is being blocked by NordVPN's extension — try Incognito (Ctrl+Shift+N). If PowerShell also fails, Tailscale or the VPS itself has a problem.
+2. **No new fills for a while?** → SSH into the VPS and run `curl -s http://localhost:8000/health` (the `/health` endpoint reports `last_tick_at`, `last_signal_emitted_at`, `last_poll_status`). If `status:ok` and recent ticks but no fills, source is quiet or trades are getting risk-rejected. Check `tail -50 /root/copytrade/backend/logs/bot.log` for `[BOT_MANAGER] risk rejected ...` lines — those tell me *why* (usually mirror size below `min_trade_usd` floor).
+3. **Bot crashed?** → `systemctl status copytrade` shows current state. `journalctl -u copytrade --since "10 minutes ago"` shows recent output. systemd auto-restarts crashed services, so a single crash usually self-heals. Also check `bot_instances.last_error` in the DB (visible on the dashboard's health banner).
+4. **Tailscale dashboard unreachable from a new device?** → Install Tailscale on the new device and sign into the same account. Confirm both devices appear at https://login.tailscale.com/admin/machines. No VPS-side change needed.
+5. **Lost my home IP whitelist (NordVPN extension blocking)?** → Already documented above. The ufw rule for the home IP `107.202.220.218` is leftover from before Tailscale — can be deleted now, since Tailscale is the only path I use.
+6. **Lost my .env / master key?** → All managed wallets are unrecoverable. Why I back the master key up to a password manager. **The live `.env` lives on the VPS at `/root/copytrade/backend/.env`** — `scp` it down for backup.
+7. **Pushed something I shouldn't have?** → `.gitignore` should prevent it. If a file made it through, `git rm --cached <file>` and add it to `.gitignore`.
 
 ---
 
@@ -178,10 +196,11 @@ CLAUDE.md tells Claude to commit + push after every successful edit. So:
 Detailed plan lives at `~/.claude/plans/i-have-a-couple-resilient-wirth.md`. Highlights:
 
 - Don't go live until ≥7 paper days, ≥1500 fills, ≥1 down day observed
-- Use a **VPS** (Hetzner / DigitalOcean) so the bot runs 24/7
-- Use a **VPN with kill-switch** if VPS is in a Polymarket-blocked region
+- ~~Use a VPS~~ ✅ **Done.** Bot runs on Hetzner Helsinki via systemd.
+- Use a **VPN with kill-switch** if VPS is in a Polymarket-blocked region — Helsinki passes the geoblock test (`ipinfo.io` returns `FI`).
 - Start live params *more conservative* than paper — friction (gas, slippage, latency) drags returns
 - One real code gap: auto-resolver doesn't call `redeemPositions()` on-chain yet. That needs to be added before live or capital won't recycle.
+- Before flipping `LIVE_TRADING_ENABLED=True` in the VPS `.env`, verify `/health` reports `status:ok` and the dashboard banner shows the bot has been ticking healthily for >24h.
 
 ---
 

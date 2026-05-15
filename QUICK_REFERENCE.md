@@ -199,7 +199,7 @@ Detailed plan lives at `~/.claude/plans/i-have-a-couple-resilient-wirth.md`. Hig
 - ~~Use a VPS~~ ✅ **Done.** Bot runs on Hetzner Helsinki via systemd.
 - Use a **VPN with kill-switch** if VPS is in a Polymarket-blocked region — Helsinki passes the geoblock test (`ipinfo.io` returns `FI`).
 - Start live params *more conservative* than paper — friction (gas, slippage, latency) drags returns
-- One real code gap: auto-resolver doesn't call `redeemPositions()` on-chain yet. That needs to be added before live or capital won't recycle.
+- **Redemption is manual by design.** When a market resolves, the bot's dashboard shows the realized PnL but the actual on-chain USDC stays locked in unredeemed outcome tokens until I click "Redeem" on Polymarket's UI (with NordVPN/Finland on). The bot reads real on-chain USDC every tick, so I need to redeem regularly or the bot will run out of liquid balance to size trades. Habit: redeem once a day. Gas cost: pennies per click.
 - Before flipping `LIVE_TRADING_ENABLED=True` in the VPS `.env`, verify `/health` reports `status:ok` and the dashboard banner shows the bot has been ticking healthily for >24h.
 
 ---

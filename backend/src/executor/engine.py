@@ -16,6 +16,12 @@ asyncio.to_thread() to free the loop."""
 import time
 from datetime import datetime
 
+# Patch py-clob-client to use Polymarket's V2 exchange contracts BEFORE
+# importing ClobClient — the V1 addresses hardcoded in the SDK get rejected
+# by Polymarket's matching engine with order_version_mismatch since the
+# 2026-04-28 exchange upgrade. See src/wallet/sdk_v2_compat.py.
+from src.wallet import sdk_v2_compat  # noqa: F401 — import for side effect
+
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL

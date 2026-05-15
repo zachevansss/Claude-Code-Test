@@ -665,6 +665,10 @@ const escapeHtml = (s) => {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
 };
+// Browser's detected timezone — exposed in the health footer for easy
+// debugging when timestamps look wrong.
+const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "unknown";
+
 const fmtTime = (isoUtc) => {
   if (!isoUtc) return "—";
   const d = new Date(isoUtc);
@@ -672,6 +676,7 @@ const fmtTime = (isoUtc) => {
     month: "numeric", day: "numeric",
     hour: "numeric", minute: "2-digit",
     hour12: true,
+    timeZoneName: "short",
   });
 };
 const fmtDate = (isoUtc) => {
@@ -1058,6 +1063,10 @@ function renderHealth(data) {
       <div class="health-item">
         <span class="lbl">Updated:</span>
         <span class="val" id="last-updated">just now</span>
+      </div>
+      <div class="health-item">
+        <span class="lbl">Times shown in:</span>
+        <span class="val">${escapeHtml(BROWSER_TZ)}</span>
       </div>
       ${b.last_error ? `<div class="health-error">⚠ ${escapeHtml(b.last_error)}</div>` : ""}
     </div>

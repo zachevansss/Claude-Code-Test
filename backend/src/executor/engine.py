@@ -58,6 +58,19 @@ class ExecutionEngine:
                 "LIVE_TRADING_ENABLED kill switch is OFF — no live orders."
             )
 
+    def _refuse_unless_v2_signing_ready(self) -> None:
+        # py-clob-client 0.34.6 signs V1 orders; Polymarket migrated to V2 on
+        # 2026-04-28. Submitting a V1-shaped order against V2 returns
+        # `order_version_mismatch`. Until ExchangeOrderBuilderV2 is ported to
+        # Python (see src/wallet/sdk_v2_compat.py and clob-client-v2 on GitHub),
+        # refuse live orders even when the kill switch is on. Bot logs the
+        # refusal as last_error and keeps polling; no money moves.
+        raise ExecutionRefused(
+            "py-clob-client SDK signs V1 orders; Polymarket requires V2 since "
+            "2026-04-28. Going live is blocked until V2 signing is ported to "
+            "Python. See src/wallet/sdk_v2_compat.py for status."
+        )
+
     def _load_wallet(self) -> ManagedWallet:
         wallet = (
             self.db.query(ManagedWallet)
@@ -123,6 +136,7 @@ class ExecutionEngine:
 
     def execute(self, order: SizedOrder, source_wallet: str) -> Trade:
         self._refuse_unless_armed()
+        self._refuse_unless_v2_signing_ready()
         if not order.asset_id:
             raise ExecutionRefused("order missing asset_id — refusing live placement")
         if not order.external_tx:

@@ -1,31 +1,35 @@
-"""Patch py-clob-client 0.34.6 to use Polymarket's V2 exchange contracts.
+"""PARTIAL patch — DOES NOT make py-clob-client V2-compatible by itself.
 
-The SDK ships with V1 (pre-2026-04-28) addresses hardcoded in
-``py_clob_client.config.get_contract_config``. After the 2026-04-28 exchange
-upgrade, Polymarket's matching engine only accepts orders signed against the
-V2 verifying contracts and rejects V1-domain signatures with::
+Background: Polymarket migrated to V2 exchange contracts on 2026-04-28.
+The archived py-clob-client (v0.34.6, last on PyPI) signs V1 orders, which
+Polymarket's matching engine rejects with ``order_version_mismatch``.
 
-    {"error": "order_version_mismatch"}
+This module fixes TWO of the THREE things that need to change to sign V2:
 
-Two distinct things need patching:
+1. ``get_contract_config`` — return V2 exchange addresses + pUSD collateral
+   on Polygon mainnet. (Done here.)
+2. EIP-712 domain ``version`` field — V2 contracts report ``version="2"``
+   via their EIP-5267 ``eip712Domain()`` view. (Done here.)
+3. **Order struct + type hash** — V2 drops ``taker``, ``expiration``,
+   ``nonce``, ``feeRateBps`` from the signed struct and adds ``timestamp``,
+   ``metadata``, ``builder``. The type hash is therefore completely
+   different. **(NOT DONE.)** py_order_utils.model.order.Order is still
+   the V1 layout; patching the struct in place is non-trivial because the
+   layout drives both the type-hash and the on-wire JSON.
 
-1. ``py_clob_client.config.get_contract_config`` — the exchange/collateral
-   address lookup. V1 addresses get rejected by Polymarket's matching
-   engine; we substitute the V2 addresses + pUSD collateral.
+Empirically verified 2026-05-15 via ``scripts/probe_sdk_post*.py``:
+V1 (unpatched) → ``order_version_mismatch``.
+V1 + this partial patch (V2 address + version='2', V1 struct) →
+``order_version_mismatch`` (because the struct/type-hash is still V1).
 
-2. ``py_order_utils.builders.base_builder.BaseBuilder._get_domain_separator``
-   — the EIP-712 domain construction. py_order_utils hardcodes
-   ``version="1"`` but the on-chain V2 contracts report ``version="2"``
-   via their EIP-5267 ``eip712Domain()`` method. With only fix #1 applied,
-   orders still get ``order_version_mismatch``. With both fixes applied,
-   signatures verify against the V2 contracts and the matching engine
-   accepts the order.
+Until #3 is implemented (port of ``ExchangeOrderBuilderV2`` from
+github.com/Polymarket/clob-client-v2 into Python), :class:`ExecutionEngine`
+refuses live orders even when ``LIVE_TRADING_ENABLED=True``. See the
+``_refuse_unless_v2_signing_ready`` gate in ``src/executor/engine.py``.
 
-Idempotent — calling :func:`apply` multiple times is a no-op after the first.
-
-Verified empirically 2026-05-15 via ``scripts/probe_sdk_post.py``: V1 path
-returned ``order_version_mismatch``; V2 (this patch) returned a valid
-``order_id`` on a tiny unfillable BUY.
+This file is kept as a partial fix so that the V2 port, when done, only
+needs to add the missing struct/type-hash work and not redo the address
+and domain-version pieces.
 """
 from py_clob_client.clob_types import ContractConfig
 

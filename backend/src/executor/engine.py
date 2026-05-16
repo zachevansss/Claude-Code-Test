@@ -1,4 +1,4 @@
-"""Live execution via Polymarket CLOB.
+"""Live execution via Polymarket CLOB (V2 exchange, post-2026-04-28 upgrade).
 
 Three independent safety gates — ALL must pass before an order is placed:
   1. settings.live_trading_enabled is True (global kill switch)
@@ -9,25 +9,27 @@ Three independent safety gates — ALL must pass before an order is placed:
 A failed order is not a crashed bot. ExecutionEngine raises on failure;
 BotManager catches, persists last_error to BotInstance, and continues.
 
-Concurrency note: py-clob-client is sync. The bot loop is async. Each .execute()
-call briefly blocks the event loop while it signs and posts. For a handful of
-users this is fine; if you scale past ~50 concurrent bots, wrap calls with
-asyncio.to_thread() to free the loop."""
+Signing path: this module uses :mod:`src.executor.v2_signing` — a pure-Python
+port of clob-client-v2's ``ExchangeOrderBuilderV2`` — for all order signing
+and posting. py-clob-client is still kept around for read-only HTTP helpers
+(``get_neg_risk``, ``get_tick_size``) and L1 auth / API key derivation, which
+are unaffected by the V2 upgrade. The V2 port is hash-equivalent to the
+TypeScript reference (verified by ``scripts/probe_v2_hash_parity.py``).
+
+Concurrency note: order signing is CPU-bound and the HTTP POST is sync. The
+bot loop is async. Each .execute() call briefly blocks the event loop while
+it signs and posts. For a handful of users this is fine; past ~50 concurrent
+bots, wrap calls with asyncio.to_thread() to free the loop."""
+import json
 import time
 from datetime import datetime
 
-# Patch py-clob-client to use Polymarket's V2 exchange contracts BEFORE
-# importing ClobClient — the V1 addresses hardcoded in the SDK get rejected
-# by Polymarket's matching engine with order_version_mismatch since the
-# 2026-04-28 exchange upgrade. See src/wallet/sdk_v2_compat.py.
-from src.wallet import sdk_v2_compat  # noqa: F401 — import for side effect
-
+import httpx
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType
-from py_clob_client.order_builder.constants import BUY, SELL
 from sqlalchemy.orm import Session
 
 from src.config.settings import settings
+from src.executor import v2_signing
 from src.models import ManagedWallet, Position, Trade
 from src.risk.manager import SizedOrder
 from src.utils.logging import get_logger
@@ -134,9 +136,95 @@ class ExecutionEngine:
             limit = order.price * (1.0 - slip)
         return max(0.001, min(0.999, limit))
 
+    def cancel_order(self, clob_order_id: str) -> dict:
+        """Cancel an open order. Used by the live probe and any future
+        cancellation flow; not currently invoked by the bot loop."""
+        wallet = self._load_wallet()
+        client = self._get_client(wallet)
+        body_str = json.dumps({"orderID": clob_order_id}, separators=(",", ":"))
+        headers = v2_signing.build_l2_headers(
+            signer_address=wallet.address,
+            api_key=client.creds.api_key,
+            api_secret=client.creds.api_secret,
+            api_passphrase=client.creds.api_passphrase,
+            method="DELETE",
+            request_path="/order",
+            body=body_str,
+        )
+        resp = httpx.request(
+            "DELETE",
+            f"{settings.polymarket_base_url}/order",
+            content=body_str,
+            headers={**headers, "Content-Type": "application/json"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def _build_and_post_v2(
+        self,
+        *,
+        wallet: ManagedWallet,
+        client: ClobClient,
+        token_id: str,
+        side: str,
+        price: float,
+        size: float,
+        order_type: str = "GTC",
+    ) -> dict:
+        """Build, sign, and POST a V2 order. Returns the parsed JSON response.
+
+        Replaces py-clob-client's create_order + post_order (which produces V1
+        orders that Polymarket rejects post-2026-04-28). Uses
+        :mod:`src.executor.v2_signing` for the order construction + signing
+        and httpx for the POST. Reuses ``client.creds`` for the L2 HMAC
+        headers — those are derived once at client init and remain valid."""
+        tick_size = client.get_tick_size(token_id)
+        neg_risk = client.get_neg_risk(token_id)
+        exchange = v2_signing.NEG_RISK_EXCHANGE_V2 if neg_risk else v2_signing.CTF_EXCHANGE_V2
+
+        maker_amt, taker_amt = v2_signing.compute_amounts(
+            "BUY" if side == "buy" else "SELL", size, price, tick_size,
+        )
+        order = v2_signing.build_order(
+            maker=wallet.proxy_address or wallet.address,
+            signer=wallet.address,
+            token_id=token_id,
+            maker_amount=maker_amt,
+            taker_amount=taker_amt,
+            side="BUY" if side == "buy" else "SELL",
+            signature_type=(
+                v2_signing.SIG_POLY_PROXY if wallet.proxy_address else v2_signing.SIG_EOA
+            ),
+        )
+        priv = WalletManager.get_private_key_hex(wallet)
+        signed = v2_signing.sign_order(order, exchange, priv)
+
+        body = v2_signing.order_to_wire(
+            signed, owner=client.creds.api_key, order_type=order_type,
+        )
+        body_str = json.dumps(body, separators=(",", ":"))
+        headers = v2_signing.build_l2_headers(
+            signer_address=wallet.address,
+            api_key=client.creds.api_key,
+            api_secret=client.creds.api_secret,
+            api_passphrase=client.creds.api_passphrase,
+            method="POST",
+            request_path="/order",
+            body=body_str,
+        )
+        resp = httpx.post(
+            f"{settings.polymarket_base_url}/order",
+            content=body_str,
+            headers={**headers, "Content-Type": "application/json"},
+            timeout=15,
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(f"CLOB {resp.status_code}: {resp.text}")
+        return resp.json()
+
     def execute(self, order: SizedOrder, source_wallet: str) -> Trade:
         self._refuse_unless_armed()
-        self._refuse_unless_v2_signing_ready()
         if not order.asset_id:
             raise ExecutionRefused("order missing asset_id — refusing live placement")
         if not order.external_tx:
@@ -144,21 +232,17 @@ class ExecutionEngine:
 
         wallet = self._load_wallet()
         client = self._get_client(wallet)
-
         limit = self._limit_price(order)
-        args = OrderArgs(
-            price=limit,
-            size=order.size,
-            side=BUY if order.side == "buy" else SELL,
-            token_id=order.asset_id,
-        )
 
         last_err: Exception | None = None
         order_id: str | None = None
         for attempt in range(1, settings.execution_max_retries + 1):
             try:
-                signed = client.create_order(args)
-                resp = client.post_order(signed, OrderType.GTC)
+                resp = self._build_and_post_v2(
+                    wallet=wallet, client=client,
+                    token_id=order.asset_id, side=order.side,
+                    price=limit, size=order.size,
+                )
                 order_id = (
                     resp.get("orderID")
                     or resp.get("order_id")

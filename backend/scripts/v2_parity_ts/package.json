@@ -1,0 +1,10 @@
+{
+  "name": "v2-parity-ts",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript reference for V2 signing — used by ../probe_v2_hash_parity.py to verify the Python port matches @polymarket/clob-client-v2 byte-for-byte. Run `npm install` once before running the probe.",
+  "dependencies": {
+    "@polymarket/clob-client-v2": "^1.0.6",
+    "ethers": "^5.7.2"
+  }
+}

@@ -276,17 +276,96 @@ def typed_data_hash(order: OrderV2, exchange_address: str) -> bytes:
 
 
 def sign_order(order: OrderV2, exchange_address: str, private_key: str) -> SignedOrderV2:
-    """Sign a V2 order. ``private_key`` is the EOA hex (with or without 0x).
-    The address derived from this key must equal ``order.signer`` for the
-    Polymarket matching engine to accept the order under signature types
-    EOA/POLY_PROXY/POLY_GNOSIS_SAFE."""
+    """Dispatcher. Standard EIP-712 for EOA/POLY_PROXY/POLY_GNOSIS_SAFE;
+    EIP-7739 nested typed-data sign for POLY_1271 (the ERC-1271 smart
+    contract wallet scheme that Polymarket V2 calls the "deposit wallet
+    flow"). For POLY_1271 the order.maker and order.signer must BOTH be
+    the proxy contract address; the EOA private key signs an inner
+    TypedDataSign envelope on behalf of the contract."""
+    if order.signature_type == SIG_POLY_1271:
+        return _sign_order_1271(order, exchange_address, private_key)
+    return _sign_order_eip712(order, exchange_address, private_key)
+
+
+def _sign_order_eip712(order: OrderV2, exchange_address: str, private_key: str) -> SignedOrderV2:
     digest = typed_data_hash(order, exchange_address)
-    # ``eth_account.Account.signHash`` is the recoverable ECDSA sign; the
-    # output is a 65-byte (r || s || v) signature, which is what Polymarket
-    # expects in the wire JSON.
     sig = Account._sign_hash(digest, private_key=private_key)
     sig_hex = "0x" + sig.signature.hex().removeprefix("0x")
     return SignedOrderV2(order=order, signature=sig_hex)
+
+
+# --- POLY_1271 (EIP-7739 / "deposit wallet flow") ---------------------------
+
+# This is what Polymarket calls when the maker is a smart contract wallet
+# (e.g. the Magic Link / Coinbase onramp proxy). The on-chain check is
+# ERC-1271 isValidSignature; the off-chain construction is EIP-7739 nested
+# typed-data:
+#
+#   inner_sig = sign_typed_data(
+#       domain  = exchange CTF V2 domain,
+#       primary = TypedDataSign,
+#       value   = { contents: <Order struct>, name: "DepositWallet",
+#                   version: "1", chainId: 137, verifyingContract: <proxy>,
+#                   salt: 0 }
+#   )
+#
+#   wire_signature = inner_sig (65) ||
+#                    app_domain_separator (32) ||
+#                    contents_hash (32) ||
+#                    ORDER_TYPE_STRING (N) ||
+#                    uint16_be(N)
+#
+# Verified bit-for-bit against the official TS client — see
+# scripts/probe_v2_hash_parity.py.
+
+TYPED_DATA_SIGN_TYPE_STRING = (
+    "TypedDataSign(Order contents,string name,string version,uint256 chainId,"
+    "address verifyingContract,bytes32 salt)"
+    + ORDER_TYPE_STRING
+)
+TYPED_DATA_SIGN_TYPE_HASH = keccak(text=TYPED_DATA_SIGN_TYPE_STRING)
+
+_DEPOSIT_WALLET_NAME = "DepositWallet"
+_DEPOSIT_WALLET_VERSION = "1"
+
+
+def _typed_data_sign_struct_hash(order: OrderV2, exchange_address: str) -> bytes:
+    """Hash of the TypedDataSign envelope. ``contents`` is the Order struct
+    (represented by its own hashStruct, per EIP-712 nested-struct rules);
+    ``verifyingContract`` is the proxy address (== order.signer in POLY_1271
+    mode) — NOT the exchange address. ``salt`` is the bytes32 zero constant."""
+    return keccak(abi_encode(
+        ["bytes32", "bytes32", "bytes32", "bytes32", "uint256", "address", "bytes32"],
+        [
+            TYPED_DATA_SIGN_TYPE_HASH,
+            _struct_hash(order),
+            keccak(text=_DEPOSIT_WALLET_NAME),
+            keccak(text=_DEPOSIT_WALLET_VERSION),
+            137,
+            to_checksum_address(order.signer),  # proxy in POLY_1271 mode
+            b"\x00" * 32,                       # salt
+        ],
+    ))
+
+
+def _sign_order_1271(order: OrderV2, exchange_address: str, private_key: str) -> SignedOrderV2:
+    """Produce the EIP-7739 wrapped signature Polymarket V2 expects for
+    smart-contract wallets. The inner signature is over the TypedDataSign
+    envelope using the EXCHANGE'S domain separator (not the proxy's).
+    The four trailing fields let the on-chain verifier reconstruct the
+    typed-data hash without trusting the caller."""
+    domain_sep = _domain_separator(exchange_address)
+    tds_hash = _typed_data_sign_struct_hash(order, exchange_address)
+    inner_digest = keccak(b"\x19\x01" + domain_sep + tds_hash)
+    inner_sig = Account._sign_hash(inner_digest, private_key=private_key).signature
+    if isinstance(inner_sig, str):
+        inner_sig = bytes.fromhex(inner_sig.removeprefix("0x"))
+
+    contents_hash = _struct_hash(order)
+    type_bytes = ORDER_TYPE_STRING.encode("utf-8")
+    length_be = len(type_bytes).to_bytes(2, "big")
+    full = inner_sig + domain_sep + contents_hash + type_bytes + length_be
+    return SignedOrderV2(order=order, signature="0x" + full.hex())
 
 
 # --- Wire serialization -----------------------------------------------------

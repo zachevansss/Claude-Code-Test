@@ -186,16 +186,27 @@ class ExecutionEngine:
         maker_amt, taker_amt = v2_signing.compute_amounts(
             "BUY" if side == "buy" else "SELL", size, price, tick_size,
         )
+        # V2 wallet routing:
+        #   - proxy contracts (Magic Link / Coinbase onramp) → POLY_1271
+        #     ("deposit wallet flow"), maker == signer == proxy address,
+        #     inner EIP-712 signed by the EOA private key.
+        #   - self-funded EOA wallets → standard SIG_EOA path.
+        # POLY_PROXY (sig type 1) was the V1 flow; Polymarket V2 rejects it
+        # for the same proxy with "maker address not allowed".
+        if wallet.proxy_address:
+            maker = signer = wallet.proxy_address
+            sig_type = v2_signing.SIG_POLY_1271
+        else:
+            maker = signer = wallet.address
+            sig_type = v2_signing.SIG_EOA
         order = v2_signing.build_order(
-            maker=wallet.proxy_address or wallet.address,
-            signer=wallet.address,
+            maker=maker,
+            signer=signer,
             token_id=token_id,
             maker_amount=maker_amt,
             taker_amount=taker_amt,
             side="BUY" if side == "buy" else "SELL",
-            signature_type=(
-                v2_signing.SIG_POLY_PROXY if wallet.proxy_address else v2_signing.SIG_EOA
-            ),
+            signature_type=sig_type,
         )
         priv = WalletManager.get_private_key_hex(wallet)
         signed = v2_signing.sign_order(order, exchange, priv)

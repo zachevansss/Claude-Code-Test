@@ -1,17 +1,22 @@
 """One-time on-chain approvals so a managed wallet can trade on Polymarket.
 
-What we approve, for both the standard CTF Exchange AND the NegRisk Exchange
+What we approve, for both the V2 CTF Exchange AND the V2 NegRisk Exchange
 (many Polymarket markets — political, multi-outcome — route through neg-risk):
-  1. USDC.approve(<exchange>, max)          — exchange can pull USDC for buys
+  1. pUSD.approve(<exchange>, max)          — exchange can pull pUSD for buys
   2. CTF.setApprovalForAll(<exchange>, True) — exchange can move outcome tokens
 
-Both contracts share the same USDC token and the same CTF (conditional tokens)
-contract; only the spender/operator differs. Per-spender allowances and
-approvals are independent, so each exchange needs its own pair.
+Both contracts share the same pUSD collateral token and the same CTF
+(conditional tokens) contract; only the spender/operator differs. Per-spender
+allowances and approvals are independent, so each exchange needs its own pair.
 
 Txs are sent as legacy gas (not EIP-1559) for broad RPC compatibility on
 Polygon. We check current allowance/approval first so a re-run costs no gas
 if everything is already set.
+
+V2 vs V1: Polymarket migrated the order book to new exchange contracts in
+~Feb 2026; collateral moved from USDC.e to pUSD (Polymarket-issued, 1:1
+backed). The addresses below are the V2 ones; V1 exchanges still exist but
+are no longer used for new orders.
 
 NOT HANDLED: the NegRisk Adapter contract (used for split/merge/redeem of
 neg-risk positions) is separate. The bot only places limit orders, which the
@@ -25,25 +30,26 @@ from web3.contract import Contract
 
 from src.config.settings import settings
 from src.utils.logging import get_logger
-from src.wallet.balances import USDC_ADDRESS
+from src.wallet.balances import PUSD_ADDRESS
 
 log = get_logger("WALLET")
 
-# Polymarket on Polygon — verify against current Polymarket docs before mainnet use.
-# Sourced from py_clob_client/config.py (the SDK's own mapping).
+# Polymarket V2 on Polygon. Sourced from the official @polymarket/clob-client-v2
+# (src/config.ts MATIC_CONTRACTS) and cross-checked on-chain.
+COLLATERAL = PUSD_ADDRESS  # pUSD — the V2 collateral token
 CTF_ADDRESS = Web3.to_checksum_address("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045")
-CTF_EXCHANGE = Web3.to_checksum_address("0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E")
-NEG_RISK_EXCHANGE = Web3.to_checksum_address("0xC5d563A36AE78145C45a50134d48A1215220f80a")
+CTF_EXCHANGE_V2 = Web3.to_checksum_address("0xE111180000d2663C0091e4f400237545B87B996B")
+NEG_RISK_EXCHANGE_V2 = Web3.to_checksum_address("0xe2222d279d744050d28e00520010520000310F59")
 EXCHANGES: list[tuple[str, str]] = [
-    ("CTF Exchange", CTF_EXCHANGE),
-    ("NegRisk Exchange", NEG_RISK_EXCHANGE),
+    ("CTF Exchange V2", CTF_EXCHANGE_V2),
+    ("NegRisk Exchange V2", NEG_RISK_EXCHANGE_V2),
 ]
 
 MAX_UINT256 = 2**256 - 1
 APPROVE_THRESHOLD = 2**200  # if allowance >= this, treat as "already approved max"
 MIN_MATIC_FOR_APPROVALS = 0.05  # ~10x worst-case gas at 100gwei
 
-USDC_APPROVE_ABI: list[dict[str, Any]] = [
+ERC20_APPROVE_ABI: list[dict[str, Any]] = [
     {
         "constant": False,
         "inputs": [
@@ -139,22 +145,22 @@ def setup_wallet(signer: LocalAccount) -> tuple[float, list[dict[str, Any]]]:
             f"Send a small amount of MATIC to {addr} and retry."
         )
 
-    usdc = w3.eth.contract(address=USDC_ADDRESS, abi=USDC_APPROVE_ABI)
+    collateral = w3.eth.contract(address=COLLATERAL, abi=ERC20_APPROVE_ABI)
     ctf = w3.eth.contract(address=CTF_ADDRESS, abi=CTF_ABI)
 
     actions: list[dict[str, Any]] = []
     nonce = w3.eth.get_transaction_count(addr)
 
     for label, spender in EXCHANGES:
-        # USDC allowance check + approve
-        current_allowance = usdc.functions.allowance(addr, spender).call()
+        # pUSD allowance check + approve
+        current_allowance = collateral.functions.allowance(addr, spender).call()
         if current_allowance >= APPROVE_THRESHOLD:
-            actions.append({"contract": f"USDC->{label}", "spender": spender, "status": "already", "tx": None})
+            actions.append({"contract": f"pUSD->{label}", "spender": spender, "status": "already", "tx": None})
         else:
-            tx = _send(w3, signer, usdc, "approve", (spender, MAX_UINT256), gas_limit=120_000, nonce=nonce)
+            tx = _send(w3, signer, collateral, "approve", (spender, MAX_UINT256), gas_limit=120_000, nonce=nonce)
             nonce += 1
-            actions.append({"contract": f"USDC->{label}", "spender": spender, "status": "approved", "tx": tx})
-            log.info("USDC approve %s sent: %s", label, tx)
+            actions.append({"contract": f"pUSD->{label}", "spender": spender, "status": "approved", "tx": tx})
+            log.info("pUSD approve %s sent: %s", label, tx)
 
         # CTF setApprovalForAll check + approve
         if ctf.functions.isApprovedForAll(addr, spender).call():

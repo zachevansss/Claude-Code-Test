@@ -28,15 +28,28 @@ from collections import defaultdict
 from typing import Any
 
 import httpx
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 from web3 import Web3
 
 sys.path.insert(0, ".")
 
 from src.config.settings import settings
-from src.database.session import SessionLocal
 from src.models import ManagedWallet, Trade
 from src.wallet.approvals import CTF_ADDRESS, COLLATERAL
 from src.wallet.manager import WalletManager
+
+
+def _make_session():
+    """Local engine with a generous SQLite busy timeout so a concurrent bot
+    tick doesn't cause us to fail immediately. Falls back to SessionLocal-style
+    defaults otherwise."""
+    connect_args: dict = {}
+    if settings.database_url.startswith("sqlite"):
+        # 30s busy timeout — bot ticks complete in well under a second.
+        connect_args = {"check_same_thread": False, "timeout": 30}
+    eng = create_engine(settings.database_url, connect_args=connect_args, future=True)
+    return sessionmaker(bind=eng, autocommit=False, autoflush=False, future=True)()
 
 
 GAMMA_API = "https://gamma-api.polymarket.com"
@@ -107,7 +120,7 @@ def main() -> int:
     parser.add_argument("--confirm", action="store_true")
     args = parser.parse_args()
 
-    db = SessionLocal()
+    db = _make_session()
     try:
         wallet = (
             db.query(ManagedWallet)

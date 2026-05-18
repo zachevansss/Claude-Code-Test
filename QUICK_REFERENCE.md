@@ -6,7 +6,7 @@ A condensed cheat-sheet for **what this project is, how it fits together, and th
 
 ## What the project does (one paragraph)
 
-A Polymarket copy-trading bot. I point it at a source wallet on Polymarket, and the bot mirrors that wallet's trades into my own (paper or live) account, with risk caps so it can't blow up. **It runs 24/7 on a Hetzner VPS in Helsinki** (`204.168.246.106`) as a systemd service called `copytrade`. The local Windows machine is no longer the bot's home — it's just where I look at the dashboard from. The bot fills as the source fills, auto-closes positions when markets resolve, and produces a live dashboard I can watch over Tailscale at `http://100.107.39.71:8000/dashboard`.
+A Polymarket copy-trading bot. I point it at a source wallet on Polymarket, and the bot mirrors that wallet's trades into my own (paper or live) account, with risk caps so it can't blow up. **It runs 24/7 on a Hetzner VPS in Helsinki** (`204.168.246.106`) as a systemd service called `copytrade`. The local Windows machine is no longer the bot's home — it's just where I look at the dashboard from. The bot fills as the source fills, auto-closes positions when markets resolve, and produces a live dashboard I can watch over Tailscale at `http://100.107.39.71:8000/dashboard`. **In live mode**, the bot trades from a self-custodied EOA on Polygon (`0xe5d87349…498b8`) via Polymarket's V2 CLOB — funds are pUSD; the proxy / Magic Link wallet is bypassed entirely.
 
 ---
 
@@ -133,6 +133,25 @@ Then on the VPS:
 | `journalctl -u copytrade --no-pager --since "5 minutes ago" \| tail -50` | Recent log lines from systemd |
 | `tail -f /root/copytrade/backend/logs/bot.log` | Live log tail — better for watching trades flow in real time |
 | `curl -s http://localhost:8000/health` | Bot's own health JSON — same as the dashboard URL but compact |
+| `systemctl list-timers copytrade-*` | See next-fire time for both the nightly redemption timer and the 5-min monitor timer |
+| `journalctl -u copytrade-redeem --since yesterday` | What last night's redemption cron did (or didn't do) |
+| `journalctl -u copytrade-monitor --since "1 hour ago" \| tail` | What the alert monitor has been seeing |
+
+### Automated jobs (set up 2026-05-18, running on the VPS)
+
+Two systemd timers handle the "set and forget" parts. Both are at `/etc/systemd/system/copytrade-{redeem,monitor}.{service,timer}`.
+
+| Timer | Fires | What it does |
+|---|---|---|
+| `copytrade-redeem.timer` | `00:00 America/Chicago` daily (handles DST) | Calls `CTF.redeemPositions` for every resolved standard market the EOA still holds outcome tokens for. **Neg-risk markets are skipped** (phase 2 work). pUSD lands back at the EOA, bot's next tick picks up the new balance for sizing. |
+| `copytrade-monitor.timer` | every 5 min | Checks `systemctl is-active copytrade`, `/health`, tick freshness, on-chain MATIC; pushes alerts to ntfy.sh on issues. |
+
+**Push alerts via ntfy.sh.** Topic suffix: `copytrade-zach-bXhgqJszo0K_bUU9YVDb0NdB`. I subscribe in the free ntfy iOS/Android app (paste topic name, no account needed). Conditions that alert: bot service down, /health unreachable, tick stale >30 min, bot status≠running, bot last_error non-null, MATIC < 1.0 (warn) / < 0.1 (critical). 6-hour cooldown per condition.
+
+Manual override commands (from VPS):
+- `systemctl start copytrade-redeem.service` — fire redemption now
+- `systemctl start copytrade-monitor.service` — re-check alerts now
+- `curl -X POST "https://ntfy.sh/copytrade-zach-bXhgqJszo0K_bUU9YVDb0NdB" -H "Title: Test" -d "hi"` — send a test push
 
 ### What still works locally for legacy / offline viewing
 
@@ -183,11 +202,13 @@ CLAUDE.md tells Claude to commit + push after every successful edit. So:
 
 1. **Dashboard URL won't load in browser?** → First: does PowerShell `Invoke-WebRequest -Uri "http://100.107.39.71:8000/health"` succeed? If yes, the bot is fine and the browser is being blocked by NordVPN's extension — try Incognito (Ctrl+Shift+N). If PowerShell also fails, Tailscale or the VPS itself has a problem.
 2. **No new fills for a while?** → SSH into the VPS and run `curl -s http://localhost:8000/health` (the `/health` endpoint reports `last_tick_at`, `last_signal_emitted_at`, `last_poll_status`). If `status:ok` and recent ticks but no fills, source is quiet or trades are getting risk-rejected. Check `tail -50 /root/copytrade/backend/logs/bot.log` for `[BOT_MANAGER] risk rejected ...` lines — those tell me *why* (usually mirror size below `min_trade_usd` floor).
-3. **Bot crashed?** → `systemctl status copytrade` shows current state. `journalctl -u copytrade --since "10 minutes ago"` shows recent output. systemd auto-restarts crashed services, so a single crash usually self-heals. Also check `bot_instances.last_error` in the DB (visible on the dashboard's health banner).
-4. **Tailscale dashboard unreachable from a new device?** → Install Tailscale on the new device and sign into the same account. Confirm both devices appear at https://login.tailscale.com/admin/machines. No VPS-side change needed.
-5. **Lost my home IP whitelist (NordVPN extension blocking)?** → Already documented above. The ufw rule for the home IP `107.202.220.218` is leftover from before Tailscale — can be deleted now, since Tailscale is the only path I use.
-6. **Lost my .env / master key?** → All managed wallets are unrecoverable. Why I back the master key up to a password manager. **The live `.env` lives on the VPS at `/root/copytrade/backend/.env`** — `scp` it down for backup.
-7. **Pushed something I shouldn't have?** → `.gitignore` should prevent it. If a file made it through, `git rm --cached <file>` and add it to `.gitignore`.
+3. **Bot crashed?** → `systemctl status copytrade` shows current state. `journalctl -u copytrade --since "10 minutes ago"` shows recent output. systemd auto-restarts crashed services, so a single crash usually self-heals. Also check `bot_instances.last_error` in the DB (visible on the dashboard's health banner). If the failure is `sqlite3.OperationalError: database is locked`, verify the DB is still in WAL mode: `sqlite3 /root/copytrade/backend/copytrade.db "PRAGMA journal_mode"` should return `wal`. The bot's connect-time pragmas reset this on every start, but worth checking after a DB restore from backup.
+4. **Phone alerts stop arriving?** → `systemctl list-timers copytrade-monitor.timer` should show a recent fire time. Test manually: `curl -X POST "https://ntfy.sh/copytrade-zach-bXhgqJszo0K_bUU9YVDb0NdB" -H "Title: Test" -d "hi"`. If that lands on phone, the channel works; the monitor cron may have a bug. If it doesn't land, check the ntfy app's subscription is still there and Notification permissions are on.
+5. **Resolved positions not redeeming?** → `journalctl -u copytrade-redeem --since yesterday` shows last night's run. Most common skip reasons: "neg-risk market — SKIP" (phase 2 work — manually redeem via Polygonscan Write Contract on the NegRiskAdapter) or "no on-chain balance" (already redeemed or never owned). Manual fire: `systemctl start copytrade-redeem.service`.
+6. **Tailscale dashboard unreachable from a new device?** → Install Tailscale on the new device and sign into the same account. Confirm both devices appear at https://login.tailscale.com/admin/machines. No VPS-side change needed.
+7. **Lost my home IP whitelist (NordVPN extension blocking)?** → Already documented above. The ufw rule for the home IP `107.202.220.218` is leftover from before Tailscale — can be deleted now, since Tailscale is the only path I use.
+8. **Lost my .env / master key?** → All managed wallets are unrecoverable. Why I back the master key up to a password manager. **The live `.env` lives on the VPS at `/root/copytrade/backend/.env`** — `scp` it down for backup. **When backing up `copytrade.db` also grab `copytrade.db-wal` and `copytrade.db-shm`** in the same instant; backing up only the `.db` while WAL has uncommitted writes loses recent activity.
+9. **Pushed something I shouldn't have?** → `.gitignore` should prevent it. If a file made it through, `git rm --cached <file>` and add it to `.gitignore`.
 
 ---
 
@@ -199,8 +220,32 @@ Detailed plan lives at `~/.claude/plans/i-have-a-couple-resilient-wirth.md`. Hig
 - ~~Use a VPS~~ ✅ **Done.** Bot runs on Hetzner Helsinki via systemd.
 - Use a **VPN with kill-switch** if VPS is in a Polymarket-blocked region — Helsinki passes the geoblock test (`ipinfo.io` returns `FI`).
 - Start live params *more conservative* than paper — friction (gas, slippage, latency) drags returns
-- **Redemption is manual by design.** When a market resolves, the bot's dashboard shows the realized PnL but the actual on-chain USDC stays locked in unredeemed outcome tokens until I click "Redeem" on Polymarket's UI (with NordVPN/Finland on). The bot reads real on-chain USDC every tick, so I need to redeem regularly or the bot will run out of liquid balance to size trades. Habit: redeem once a day. Gas cost: pennies per click.
+- ~~Redemption is manual~~ ✅ **Now automated.** The nightly `copytrade-redeem.timer` calls `CTF.redeemPositions` on resolved standard markets and lands pUSD back at the EOA. Neg-risk markets are still skipped (phase 2 work) — if I hold neg-risk winners they sit unredeemed in CTF tokens until I either build phase 2 or manually redeem via Polygonscan's Write Contract on the NegRiskAdapter.
 - Before flipping `LIVE_TRADING_ENABLED=True` in the VPS `.env`, verify `/health` reports `status:ok` and the dashboard banner shows the bot has been ticking healthily for >24h.
+
+## Live launch state (as of 2026-05-18)
+
+The migration from proxy to self-custody EOA is **done** — held only at the user's request before flipping the final live env flag. Everything below is on-chain reality:
+
+| State | Value |
+|---|---|
+| EOA address | `0xe5d87349a102c2b8b1f84f34e6c8ac6310c498b8` |
+| pUSD balance | 998.91 |
+| MATIC (gas) | 20.77 |
+| `managed_wallets.proxy_address` for user_id=1 | NULL (executor routes via SIG_EOA) |
+| pUSD → V2 CTF Exchange `0xE111...996B` | max allowance |
+| pUSD → V2 NegRisk Exchange `0xe222...0F59` | max allowance |
+| CTF → V2 CTF Exchange | approved |
+| CTF → V2 NegRisk Exchange | approved |
+| DB journal mode | `wal` (with 30s busy_timeout) |
+| `MODE` in `.env` | `paper` (held) |
+| `LIVE_TRADING_ENABLED` in `.env` | `False` (held) |
+
+To flip live: edit `/root/copytrade/backend/.env` → `MODE=live`, `LIVE_TRADING_ENABLED=True`. Apply live-mode risk overrides via `POST /settings` per `project_live_risk_overrides.md`. Then `systemctl restart copytrade`. Watch `journalctl -u copytrade -f` for the first `[EXECUTION]` lines.
+
+### How the live flow works (one-paragraph mental model)
+
+Source wallet trades → tracker emits signal → risk manager sizes via mirror_scale × sqrt(source_notional), floored at min_trade_usd → executor signs SIG_EOA order with V2 EIP-712 domain → submits to Polymarket CLOB → reconciler polls fill status every tick and writes fill_price/filled_size → on market resolution, `resolution/checker.py` closes the position in the DB at the settle price → at midnight Central the redemption timer calls `CTF.redeemPositions` and lands pUSD back at the EOA → next tick's on-chain pUSD lookup picks up the new balance → that funds the next round of orders. Failure modes alert via ntfy push.
 
 ---
 

@@ -22,34 +22,35 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 import time
 from collections import defaultdict
 from typing import Any
 
 import httpx
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from eth_account import Account
 from web3 import Web3
 
 sys.path.insert(0, ".")
 
 from src.config.settings import settings
-from src.models import ManagedWallet, Trade
 from src.wallet.approvals import CTF_ADDRESS, COLLATERAL
-from src.wallet.manager import WalletManager
+from src.wallet.crypto import decrypt
 
 
-def _make_session():
-    """Local engine with a generous SQLite busy timeout so a concurrent bot
-    tick doesn't cause us to fail immediately. Falls back to SessionLocal-style
-    defaults otherwise."""
-    connect_args: dict = {}
-    if settings.database_url.startswith("sqlite"):
-        # 30s busy timeout — bot ticks complete in well under a second.
-        connect_args = {"check_same_thread": False, "timeout": 30}
-    eng = create_engine(settings.database_url, connect_args=connect_args, future=True)
-    return sessionmaker(bind=eng, autocommit=False, autoflush=False, future=True)()
+def _read_only_query(sql: str, params: tuple = ()) -> list[tuple]:
+    """Open the SQLite DB read-only so the bot's running write transactions
+    don't block us. Works only with sqlite:// URLs."""
+    if not settings.database_url.startswith("sqlite"):
+        raise RuntimeError("read-only fallback only supports SQLite")
+    # sqlite:///./copytrade.db  ->  ./copytrade.db
+    path = settings.database_url.replace("sqlite:///", "", 1)
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+    try:
+        return conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
 
 
 GAMMA_API = "https://gamma-api.polymarket.com"
@@ -120,33 +121,30 @@ def main() -> int:
     parser.add_argument("--confirm", action="store_true")
     args = parser.parse_args()
 
-    db = _make_session()
-    try:
-        wallet = (
-            db.query(ManagedWallet)
-            .filter(ManagedWallet.user_id == args.user_id)
-            .first()
-        )
-        if not wallet:
-            print(f"no managed wallet for user_id={args.user_id}"); return 1
-        signer = WalletManager.get_signer(wallet)
-        eoa = signer.address
+    # Read managed_wallets row (need encrypted_private_key to derive signer).
+    wallet_rows = _read_only_query(
+        "SELECT address, encrypted_private_key FROM managed_wallets WHERE user_id = ?",
+        (args.user_id,),
+    )
+    if not wallet_rows:
+        print(f"no managed wallet for user_id={args.user_id}"); return 1
+    _addr, encrypted_pk = wallet_rows[0]
+    signer = Account.from_key(decrypt(encrypted_pk))
+    eoa = signer.address
 
-        # Pull distinct (market_id, asset_id) pairs from live filled trades.
-        # market_id IS the conditionId (verified via tracker/poller.py).
-        rows = (
-            db.query(Trade.market_id, Trade.asset_id)
-            .filter(
-                Trade.user_id == args.user_id,
-                Trade.mode == "live",
-                Trade.status.in_(("filled", "partial")),
-                Trade.asset_id.isnot(None),
-            )
-            .distinct()
-            .all()
-        )
-    finally:
-        db.close()
+    # Pull distinct (market_id, asset_id) pairs from live filled trades.
+    # market_id IS the conditionId (verified via tracker/poller.py).
+    rows = _read_only_query(
+        """
+        SELECT DISTINCT market_id, asset_id
+        FROM trades
+        WHERE user_id = ?
+          AND mode = 'live'
+          AND status IN ('filled', 'partial')
+          AND asset_id IS NOT NULL
+        """,
+        (args.user_id,),
+    )
 
     print(f"EOA: {eoa}")
     print(f"Distinct (market_id, asset_id) pairs from live filled trades: {len(rows)}")

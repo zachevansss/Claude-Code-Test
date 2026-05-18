@@ -139,6 +139,10 @@ def main() -> int:
                         help="size in shares (default 5)")
     parser.add_argument("--confirm", action="store_true",
                         help="actually POST the order (default dry-run)")
+    parser.add_argument("--sig-type", choices=["auto", "eoa", "proxy", "1271"], default="auto",
+                        help="override signing mode. auto: 1271 if proxy set else eoa. "
+                             "proxy: maker=proxy, signer=EOA, sig_type=1 (POLY_PROXY). "
+                             "1271: maker=signer=proxy, sig_type=3 (POLY_1271).")
     args = parser.parse_args()
 
     db = SessionLocal()
@@ -187,8 +191,31 @@ def main() -> int:
     # Build + sign
     exchange = v2_signing.NEG_RISK_EXCHANGE_V2 if neg_risk else v2_signing.CTF_EXCHANGE_V2
     maker_amt, taker_amt = v2_signing.compute_amounts("BUY", args.size, args.price, tick_size)
-    sig_type = v2_signing.SIG_POLY_1271 if proxy else v2_signing.SIG_EOA
-    maker = signer = (proxy or addr)
+
+    # Pick signing mode. POLY_PROXY (sig_type=1) is the only mode where
+    # maker=proxy AND signer=EOA — meaning it can satisfy both Polymarket
+    # checks simultaneously (maker allowed because it's a proxy; signer
+    # matches the API-key EOA).
+    mode = args.sig_type
+    if mode == "auto":
+        mode = "1271" if proxy else "eoa"
+    if mode == "eoa":
+        maker = signer = addr
+        sig_type = v2_signing.SIG_EOA
+    elif mode == "proxy":
+        if not proxy:
+            raise SystemExit("--sig-type proxy needs proxy_address set on the wallet")
+        maker = proxy
+        signer = addr
+        sig_type = v2_signing.SIG_POLY_PROXY
+    elif mode == "1271":
+        if not proxy:
+            raise SystemExit("--sig-type 1271 needs proxy_address set on the wallet")
+        maker = signer = proxy
+        sig_type = v2_signing.SIG_POLY_1271
+    else:
+        raise SystemExit(f"unknown sig-type: {mode}")
+    print(f"sig mode:      {mode}  (maker={maker[:10]}..., signer={signer[:10]}..., sig_type={sig_type})")
     order = v2_signing.build_order(
         maker=maker, signer=signer, token_id=token_id,
         maker_amount=maker_amt, taker_amount=taker_amt,

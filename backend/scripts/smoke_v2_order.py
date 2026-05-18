@@ -52,12 +52,16 @@ def get_client(wallet: ManagedWallet) -> ClobClient:
 
 
 def pick_active_token(client: ClobClient) -> tuple[str, str]:
-    """Find an active market that's accepting orders and pick its first
-    outcome's token_id. Returns (token_id, human_description)."""
+    """Find an active market with a live orderbook (has bids or asks) and
+    return one of its tokens. accepting_orders=true alone isn't enough — some
+    markets are accepting orders but the orderbook isn't initialized yet,
+    which gets us 'the orderbook ... does not exist' at POST time. Probe
+    /book per candidate to filter those out."""
     resp = client.get_simplified_markets("")
     markets = resp.get("data") if isinstance(resp, dict) else None
     if not markets:
         raise RuntimeError(f"get_simplified_markets returned no data: {resp!r}")
+    probed = 0
     for m in markets:
         if not m.get("accepting_orders"):
             continue
@@ -65,8 +69,18 @@ def pick_active_token(client: ClobClient) -> tuple[str, str]:
             tid = tok.get("token_id")
             if not tid or tid == "0":
                 continue
-            return tid, f"{m.get('question', '?')[:60]} ({tok.get('outcome')})"
-    raise RuntimeError("no active markets accepting orders in first page")
+            probed += 1
+            try:
+                book = client.get_order_book(tid)
+            except Exception:
+                continue
+            bids = getattr(book, "bids", None) or []
+            asks = getattr(book, "asks", None) or []
+            if bids or asks:
+                return tid, f"{m.get('question', '?')[:60]} ({tok.get('outcome')})"
+        if probed > 30:
+            break
+    raise RuntimeError(f"no active markets with live orderbooks in first page (probed {probed})")
 
 
 def _l2_headers(client: ClobClient, addr: str, method: str, path: str, body: str) -> dict:

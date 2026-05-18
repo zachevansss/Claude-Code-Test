@@ -46,7 +46,12 @@ def _read_only_query(sql: str, params: tuple = ()) -> list[tuple]:
         raise RuntimeError("read-only fallback only supports SQLite")
     # sqlite:///./copytrade.db  ->  ./copytrade.db
     path = settings.database_url.replace("sqlite:///", "", 1)
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+    # immutable=1 skips locking entirely. Safe here because:
+    #  (1) we only need a snapshot of a few rows, and
+    #  (2) the bot uses rollback-journal mode where a writer blocks plain
+    #      mode=ro reads. immutable=1 is the standard workaround for a
+    #      short-lived occasional reader against an active writer.
+    conn = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True, timeout=30)
     try:
         return conn.execute(sql, params).fetchall()
     finally:

@@ -52,16 +52,49 @@ def get_client(wallet: ManagedWallet) -> ClobClient:
 
 
 def pick_active_token(client: ClobClient) -> tuple[str, str]:
-    """Find an active market with a live orderbook (has bids or asks) and
-    return one of its tokens. accepting_orders=true alone isn't enough — some
-    markets are accepting orders but the orderbook isn't initialized yet,
-    which gets us 'the orderbook ... does not exist' at POST time. Probe
-    /book per candidate to filter those out."""
+    """Find an active market with a live orderbook (has bids or asks).
+
+    The CLOB's `simplified-markets` first page is heavily polluted with archived
+    markets that return 404 from /book. The Gamma API at gamma-api.polymarket.com
+    exposes a clean `active=true & closed=false` filter and sorts by 24h volume,
+    so a single page is almost guaranteed to contain at least one live book.
+    Falls back to CLOB simplified-markets only if Gamma is unreachable."""
+    probed = 0
+    try:
+        resp = httpx.get(
+            "https://gamma-api.polymarket.com/markets",
+            params={"active": "true", "closed": "false", "limit": 25,
+                    "order": "volume24hr", "ascending": "false"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        markets = resp.json()
+        for m in markets:
+            tids_raw = m.get("clobTokenIds")
+            if not tids_raw:
+                continue
+            tids = json.loads(tids_raw) if isinstance(tids_raw, str) else tids_raw
+            for tid in tids:
+                if not tid or str(tid) == "0":
+                    continue
+                probed += 1
+                try:
+                    book = client.get_order_book(str(tid))
+                except Exception:
+                    continue
+                bids = getattr(book, "bids", None) or []
+                asks = getattr(book, "asks", None) or []
+                if bids or asks:
+                    q = (m.get("question") or m.get("slug") or "?")[:60]
+                    return str(tid), q
+    except Exception as e:
+        print(f"  (gamma lookup failed, falling back to simplified-markets: {e})")
+
+    # Fallback: legacy simplified-markets probe
     resp = client.get_simplified_markets("")
     markets = resp.get("data") if isinstance(resp, dict) else None
     if not markets:
-        raise RuntimeError(f"get_simplified_markets returned no data: {resp!r}")
-    probed = 0
+        raise RuntimeError(f"no markets found (probed {probed} via gamma)")
     for m in markets:
         if not m.get("accepting_orders"):
             continue
@@ -78,9 +111,9 @@ def pick_active_token(client: ClobClient) -> tuple[str, str]:
             asks = getattr(book, "asks", None) or []
             if bids or asks:
                 return tid, f"{m.get('question', '?')[:60]} ({tok.get('outcome')})"
-        if probed > 30:
+        if probed > 50:
             break
-    raise RuntimeError(f"no active markets with live orderbooks in first page (probed {probed})")
+    raise RuntimeError(f"no active markets with live orderbooks found (probed {probed})")
 
 
 def _l2_headers(client: ClobClient, addr: str, method: str, path: str, body: str) -> dict:

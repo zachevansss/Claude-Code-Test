@@ -1,0 +1,212 @@
+"""Smoke test: post a single tiny limit order, well out of fill range, and
+cancel it. Confirms whether user_id=1's managed EOA is accepted by Polymarket's
+V2 CLOB after the EOA rotation.
+
+Default: BUY 5 shares at $0.01 on the first active market. At $0.01, no one
+will sell — so even if the order is accepted, it won't fill. We cancel
+immediately to clean up either way.
+
+Run from backend/ on the VPS:
+    .venv/bin/python -m scripts.smoke_v2_order               # dry-run
+    .venv/bin/python -m scripts.smoke_v2_order --confirm     # actually post
+
+Expected outcomes:
+  - HTTP 200 with order_id   -> rotation WORKED. Order accepted; we cancel.
+  - 4xx "maker not allowed"  -> rotation DIDN'T fix it; deeper issue.
+  - 4xx other (min size etc) -> structural issue, re-run with bigger --size.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+import httpx
+
+sys.path.insert(0, ".")
+
+from py_clob_client.client import ClobClient
+
+from src.config.settings import settings
+from src.database.session import SessionLocal
+from src.executor import v2_signing
+from src.models import ManagedWallet
+from src.wallet.manager import WalletManager
+
+
+def get_client(wallet: ManagedWallet) -> ClobClient:
+    priv = WalletManager.get_private_key_hex(wallet)
+    if wallet.proxy_address:
+        c = ClobClient(
+            host=settings.polymarket_base_url, key=priv,
+            chain_id=settings.polygon_chain_id,
+            signature_type=1, funder=wallet.proxy_address,
+        )
+    else:
+        c = ClobClient(
+            host=settings.polymarket_base_url, key=priv,
+            chain_id=settings.polygon_chain_id, signature_type=0,
+        )
+    c.set_api_creds(c.create_or_derive_api_creds())
+    return c
+
+
+def pick_active_token(client: ClobClient) -> tuple[str, str]:
+    """Find an active market that's accepting orders and pick its first
+    outcome's token_id. Returns (token_id, human_description)."""
+    resp = client.get_simplified_markets("")
+    markets = resp.get("data") if isinstance(resp, dict) else None
+    if not markets:
+        raise RuntimeError(f"get_simplified_markets returned no data: {resp!r}")
+    for m in markets:
+        if not m.get("accepting_orders"):
+            continue
+        for tok in m.get("tokens", []):
+            tid = tok.get("token_id")
+            if not tid or tid == "0":
+                continue
+            return tid, f"{m.get('question', '?')[:60]} ({tok.get('outcome')})"
+    raise RuntimeError("no active markets accepting orders in first page")
+
+
+def _l2_headers(client: ClobClient, addr: str, method: str, path: str, body: str) -> dict:
+    return v2_signing.build_l2_headers(
+        signer_address=addr,
+        api_key=client.creds.api_key,
+        api_secret=client.creds.api_secret,
+        api_passphrase=client.creds.api_passphrase,
+        method=method,
+        request_path=path,
+        body=body,
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--user-id", type=int, default=1)
+    parser.add_argument("--token-id", default=None,
+                        help="specific token to bid on (default: auto-pick first active)")
+    parser.add_argument("--price", type=float, default=0.01,
+                        help="limit price 0.001-0.999 (default 0.01, below any reasonable ask)")
+    parser.add_argument("--size", type=float, default=5.0,
+                        help="size in shares (default 5)")
+    parser.add_argument("--confirm", action="store_true",
+                        help="actually POST the order (default dry-run)")
+    args = parser.parse_args()
+
+    db = SessionLocal()
+    try:
+        wallet = (
+            db.query(ManagedWallet)
+            .filter(ManagedWallet.user_id == args.user_id)
+            .first()
+        )
+        if not wallet:
+            print(f"no managed wallet for user_id={args.user_id}"); return 1
+        addr = wallet.address
+        proxy = wallet.proxy_address
+    finally:
+        db.close()
+
+    print(f"EOA:           {addr}")
+    print(f"proxy_address: {proxy or '(null — pure EOA mode)'}")
+
+    print(f"\nInitializing CLOB client + deriving API creds ...")
+    client = get_client(wallet)
+    print(f"api_key:       {client.creds.api_key}")
+
+    if args.token_id:
+        token_id = args.token_id
+        desc = "(user-specified)"
+    else:
+        print(f"\nAuto-picking an active market ...")
+        token_id, desc = pick_active_token(client)
+    print(f"token_id:      {token_id}")
+    print(f"market:        {desc}")
+
+    tick_size = client.get_tick_size(token_id)
+    neg_risk = client.get_neg_risk(token_id)
+    exchange_label = "NegRisk V2" if neg_risk else "CTF V2"
+    print(f"tick_size:     {tick_size}")
+    print(f"neg_risk:      {neg_risk}  ({exchange_label})")
+
+    cost_usd = args.price * args.size
+    print(f"\nPlan: BUY {args.size} shares @ ${args.price:.3f} (${cost_usd:.4f}) on {exchange_label}")
+    print(f"      This order is deeply out-of-bid; it should be accepted but never fill.")
+    if not args.confirm:
+        print("\nDRY RUN — pass --confirm to broadcast.")
+        return 0
+
+    # Build + sign
+    exchange = v2_signing.NEG_RISK_EXCHANGE_V2 if neg_risk else v2_signing.CTF_EXCHANGE_V2
+    maker_amt, taker_amt = v2_signing.compute_amounts("BUY", args.size, args.price, tick_size)
+    sig_type = v2_signing.SIG_POLY_1271 if proxy else v2_signing.SIG_EOA
+    maker = signer = (proxy or addr)
+    order = v2_signing.build_order(
+        maker=maker, signer=signer, token_id=token_id,
+        maker_amount=maker_amt, taker_amount=taker_amt,
+        side="BUY", signature_type=sig_type,
+    )
+    priv = WalletManager.get_private_key_hex(wallet)
+    signed = v2_signing.sign_order(order, exchange, priv)
+    body = v2_signing.order_to_wire(signed, owner=client.creds.api_key, order_type="GTC")
+    body_str = json.dumps(body, separators=(",", ":"))
+
+    print(f"\nPOST {settings.polymarket_base_url}/order ...")
+    resp = httpx.post(
+        f"{settings.polymarket_base_url}/order",
+        content=body_str,
+        headers={**_l2_headers(client, addr, "POST", "/order", body_str),
+                 "Content-Type": "application/json"},
+        timeout=15,
+    )
+    print(f"HTTP {resp.status_code}")
+    print(f"Body: {resp.text[:500]}")
+
+    if resp.status_code >= 400:
+        print("\n--- RESULT: REJECTED ---")
+        if "maker" in resp.text.lower() and "not allowed" in resp.text.lower():
+            print("STILL hitting 'maker not allowed' — rotation did NOT unblock orders.")
+        elif "size" in resp.text.lower() or "minimum" in resp.text.lower():
+            print("Structural rejection (size/min). Re-run with --size 100 --price 0.01.")
+        else:
+            print("Other rejection — see body above.")
+        return 2
+
+    payload = resp.json()
+    order_id = (
+        payload.get("orderID")
+        or payload.get("order_id")
+        or payload.get("orderHash")
+    )
+    if payload.get("success") is False or (not order_id and "errorMsg" in payload):
+        print("\n--- RESULT: REJECTED (200 but success=false) ---")
+        print(f"errorMsg: {payload.get('errorMsg')}")
+        return 3
+
+    print(f"\n--- RESULT: ACCEPTED ---")
+    print(f"order_id: {order_id}")
+    print(f"Rotation WORKED. Polymarket accepts orders from the new EOA.")
+
+    if not order_id:
+        print("WARN: no order_id parsed from response — manual cancel may be needed.")
+        return 0
+
+    # Cancel
+    print(f"\nCancelling order {order_id} ...")
+    cancel_body = json.dumps({"orderID": order_id}, separators=(",", ":"))
+    cresp = httpx.request(
+        "DELETE",
+        f"{settings.polymarket_base_url}/order",
+        content=cancel_body,
+        headers={**_l2_headers(client, addr, "DELETE", "/order", cancel_body),
+                 "Content-Type": "application/json"},
+        timeout=15,
+    )
+    print(f"Cancel HTTP {cresp.status_code}")
+    print(f"Cancel body: {cresp.text[:300]}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

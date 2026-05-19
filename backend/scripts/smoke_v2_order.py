@@ -41,20 +41,14 @@ from src.wallet.manager import WalletManager
 _CLOB_AUTH_MESSAGE = "This message attests that I control the given wallet"
 
 
-def derive_proxy_bound_api_creds(eoa_priv: str, proxy_address: str) -> dict[str, str]:
-    """Authenticate as `proxy_address` (signed by the EOA's PK) and obtain
-    API credentials bound to the proxy. Mirrors what polymarket.com's UI does
-    but is not exposed by py-clob-client.
-
-    The L1 EIP-712 message's `address` field is the proxy — that's the bit
-    `createL1Headers(signer, chainId, nonce, ts, address?)` in clob-client-v2
-    exposes but py-clob-client doesn't. The signature is by the EOA's PK so
-    Polymarket's server recovers the EOA, checks it's authorized for the
-    claimed proxy, and (if so) issues an API key keyed to the proxy.
-    """
+def _l1_auth_request(eoa_priv: str, claimed_address: str, chain_id: int, *, method: str, path: str) -> httpx.Response:
+    """Build an L1-authenticated request claiming to be `claimed_address`.
+    The EOA signs the ClobAuth typed-data attestation; we forward
+    POLY_ADDRESS = claimed_address (which may differ from the EOA, when
+    we want a proxy-bound key)."""
     ts = int(time.time())
     nonce = 0
-    proxy_cs = to_checksum_address(proxy_address)
+    claimed_cs = to_checksum_address(claimed_address)
 
     typed_data = {
         "types": {
@@ -74,10 +68,10 @@ def derive_proxy_bound_api_creds(eoa_priv: str, proxy_address: str) -> dict[str,
         "domain": {
             "name": "ClobAuthDomain",
             "version": "1",
-            "chainId": settings.polygon_chain_id,
+            "chainId": chain_id,
         },
         "message": {
-            "address": proxy_cs,
+            "address": claimed_cs,
             "timestamp": str(ts),
             "nonce": nonce,
             "message": _CLOB_AUTH_MESSAGE,
@@ -88,22 +82,60 @@ def derive_proxy_bound_api_creds(eoa_priv: str, proxy_address: str) -> dict[str,
     sig_hex = "0x" + sig.hex().removeprefix("0x")
 
     headers = {
-        "POLY_ADDRESS": proxy_cs,
+        "POLY_ADDRESS": claimed_cs,
         "POLY_SIGNATURE": sig_hex,
         "POLY_TIMESTAMP": str(ts),
         "POLY_NONCE": str(nonce),
+        "User-Agent": "@polymarket/clob-client",
+        "Accept": "*/*",
     }
+    url = f"{settings.polymarket_base_url}{path}"
+    if method.upper() == "POST":
+        return httpx.post(url, headers=headers, timeout=15)
+    return httpx.get(url, headers=headers, timeout=15)
 
-    url = f"{settings.polymarket_base_url}/auth/api-key"
-    resp = httpx.post(url, headers=headers, timeout=15)
-    # If a key already exists for this proxy, POST returns 400; fall back to
-    # GET /auth/derive-api-key (same headers, same signature) to retrieve it.
-    if resp.status_code == 400:
-        resp = httpx.get(
-            f"{settings.polymarket_base_url}/auth/derive-api-key",
-            headers=headers, timeout=15,
+
+def derive_proxy_bound_api_creds(eoa_priv: str, proxy_address: str) -> dict[str, str]:
+    """Authenticate as `proxy_address` (signed by the EOA's PK) and obtain
+    API credentials bound to the proxy. Mirrors what polymarket.com's UI does
+    but is not exposed by py-clob-client.
+
+    Sanity-checks the same flow with `address=EOA` first; if THAT fails, the
+    issue is in our signing, not in the EOA->proxy authorization. If
+    address=EOA succeeds and address=proxy fails, the EOA isn't the
+    authorized signer for that proxy according to Polymarket's records.
+    """
+    chain_id = settings.polygon_chain_id
+    eoa_cs = to_checksum_address(Account.from_key(eoa_priv).address)
+    proxy_cs = to_checksum_address(proxy_address)
+
+    print(f"  [1] sanity: L1 auth as the EOA itself ({eoa_cs[:10]}...) ...")
+    resp = _l1_auth_request(eoa_priv, eoa_cs, chain_id, method="POST", path="/auth/api-key")
+    if resp.status_code == 400 or (resp.status_code == 200 and not resp.json().get("apiKey")):
+        resp = _l1_auth_request(eoa_priv, eoa_cs, chain_id, method="GET", path="/auth/derive-api-key")
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"sanity L1-as-EOA failed {resp.status_code}: {resp.text[:300]}. "
+            "Our signing is broken — not a proxy-authorization issue."
         )
-    resp.raise_for_status()
+    eoa_body = resp.json()
+    print(f"      EOA-bound key: {eoa_body.get('apiKey') or eoa_body.get('api_key')}")
+
+    print(f"  [2] real: L1 auth as the proxy ({proxy_cs[:10]}...) ...")
+    resp = _l1_auth_request(eoa_priv, proxy_cs, chain_id, method="POST", path="/auth/api-key")
+    print(f"      POST status: {resp.status_code}")
+    print(f"      POST body:   {resp.text[:300]}")
+    if resp.status_code != 200 or not (resp.json().get("apiKey") or resp.json().get("api_key")):
+        print(f"  [3] fallback: GET /auth/derive-api-key as the proxy ...")
+        resp = _l1_auth_request(eoa_priv, proxy_cs, chain_id, method="GET", path="/auth/derive-api-key")
+        print(f"      GET status:  {resp.status_code}")
+        print(f"      GET body:    {resp.text[:300]}")
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"proxy-bound L1 auth failed {resp.status_code}: {resp.text[:300]}. "
+            "Our EOA-bound flow worked, so signing is fine — Polymarket says this EOA "
+            "isn't authorized for the claimed proxy."
+        )
     body = resp.json()
     creds = {
         "api_key": body.get("apiKey") or body.get("api_key"),

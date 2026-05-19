@@ -200,8 +200,8 @@ def main() -> int:
     utils_signer = UtilsSigner(key=priv)
     builder_ob = UtilsOrderBuilder(exchange, settings.polygon_chain_id, utils_signer)
     data = OrderData(
-        maker=proxy,
-        signer=eoa,
+        maker=to_checksum_address(proxy),
+        signer=to_checksum_address(eoa),
         taker="0x0000000000000000000000000000000000000000",
         tokenId=str(token_id),
         makerAmount=str(maker_amt),

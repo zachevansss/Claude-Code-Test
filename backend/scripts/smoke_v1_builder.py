@@ -29,6 +29,34 @@ import httpx
 
 sys.path.insert(0, ".")
 
+# --- Monkey-patch py-clob-client to point at V2 exchange contracts ---
+# py-clob-client 0.34.6 hardcodes the V1 exchange addresses, which makes its
+# signed orders fail Polymarket V2 validation with "order_version_mismatch".
+# The order struct shape itself is identical between V1 and V2 — only the
+# verifyingContract in the EIP-712 domain changes. Override the resolver so
+# the V4-style 12-field order is signed against the V2 exchanges.
+import py_clob_client.config
+import py_clob_client.order_builder.builder as _ob_builder
+from py_clob_client.clob_types import ContractConfig
+
+_V2_CTF = "0xE111180000d2663C0091e4f400237545B87B996B"
+_V2_NEG = "0xe2222d279d744050d28e00520010520000310F59"
+_V2_PUSD = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+_CTF_TOKEN = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+
+def _v2_get_contract_config(chain_id: int, neg_risk: bool = False) -> ContractConfig:
+    if chain_id != 137:
+        raise Exception(f"only chain 137 supported here; got {chain_id}")
+    return ContractConfig(
+        exchange=_V2_NEG if neg_risk else _V2_CTF,
+        collateral=_V2_PUSD,
+        conditional_tokens=_CTF_TOKEN,
+    )
+
+py_clob_client.config.get_contract_config = _v2_get_contract_config
+_ob_builder.get_contract_config = _v2_get_contract_config  # builder.py imported by-name
+# --- end monkey-patch ---
+
 from py_builder_signing_sdk.config import BuilderConfig
 from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
 from py_clob_client.client import ClobClient

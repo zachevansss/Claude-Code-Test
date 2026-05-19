@@ -20,8 +20,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 
 import httpx
+from eth_account import Account
+from eth_account.messages import encode_typed_data
+from eth_utils import to_checksum_address
 
 sys.path.insert(0, ".")
 
@@ -34,7 +38,87 @@ from src.models import ManagedWallet
 from src.wallet.manager import WalletManager
 
 
+_CLOB_AUTH_MESSAGE = "This message attests that I control the given wallet"
+
+
+def derive_proxy_bound_api_creds(eoa_priv: str, proxy_address: str) -> dict[str, str]:
+    """Authenticate as `proxy_address` (signed by the EOA's PK) and obtain
+    API credentials bound to the proxy. Mirrors what polymarket.com's UI does
+    but is not exposed by py-clob-client.
+
+    The L1 EIP-712 message's `address` field is the proxy — that's the bit
+    `createL1Headers(signer, chainId, nonce, ts, address?)` in clob-client-v2
+    exposes but py-clob-client doesn't. The signature is by the EOA's PK so
+    Polymarket's server recovers the EOA, checks it's authorized for the
+    claimed proxy, and (if so) issues an API key keyed to the proxy.
+    """
+    ts = int(time.time())
+    nonce = 0
+    proxy_cs = to_checksum_address(proxy_address)
+
+    typed_data = {
+        "types": {
+            "EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+            ],
+            "ClobAuth": [
+                {"name": "address", "type": "address"},
+                {"name": "timestamp", "type": "string"},
+                {"name": "nonce", "type": "uint256"},
+                {"name": "message", "type": "string"},
+            ],
+        },
+        "primaryType": "ClobAuth",
+        "domain": {
+            "name": "ClobAuthDomain",
+            "version": "1",
+            "chainId": settings.polygon_chain_id,
+        },
+        "message": {
+            "address": proxy_cs,
+            "timestamp": str(ts),
+            "nonce": nonce,
+            "message": _CLOB_AUTH_MESSAGE,
+        },
+    }
+    encoded = encode_typed_data(full_message=typed_data)
+    sig = Account.sign_message(encoded, private_key=eoa_priv).signature
+    sig_hex = "0x" + sig.hex().removeprefix("0x")
+
+    headers = {
+        "POLY_ADDRESS": proxy_cs,
+        "POLY_SIGNATURE": sig_hex,
+        "POLY_TIMESTAMP": str(ts),
+        "POLY_NONCE": str(nonce),
+    }
+
+    url = f"{settings.polymarket_base_url}/auth/api-key"
+    resp = httpx.post(url, headers=headers, timeout=15)
+    # If a key already exists for this proxy, POST returns 400; fall back to
+    # GET /auth/derive-api-key (same headers, same signature) to retrieve it.
+    if resp.status_code == 400:
+        resp = httpx.get(
+            f"{settings.polymarket_base_url}/auth/derive-api-key",
+            headers=headers, timeout=15,
+        )
+    resp.raise_for_status()
+    body = resp.json()
+    creds = {
+        "api_key": body.get("apiKey") or body.get("api_key"),
+        "api_secret": body.get("secret") or body.get("api_secret"),
+        "api_passphrase": body.get("passphrase") or body.get("api_passphrase"),
+    }
+    if not creds["api_key"]:
+        raise RuntimeError(f"proxy-bound L1 auth returned no api_key: {body}")
+    return creds
+
+
 def get_client(wallet: ManagedWallet) -> ClobClient:
+    """Build a ClobClient with API creds. If the wallet has a proxy_address,
+    use the proxy-bound L1 auth flow (manually constructed L1 EIP-712 with
+    address=proxy) instead of py-clob-client's default EOA-bound flow."""
     priv = WalletManager.get_private_key_hex(wallet)
     if wallet.proxy_address:
         c = ClobClient(
@@ -42,12 +126,19 @@ def get_client(wallet: ManagedWallet) -> ClobClient:
             chain_id=settings.polygon_chain_id,
             signature_type=1, funder=wallet.proxy_address,
         )
+        from py_clob_client.clob_types import ApiCreds
+        creds = derive_proxy_bound_api_creds(priv, wallet.proxy_address)
+        c.set_api_creds(ApiCreds(
+            api_key=creds["api_key"],
+            api_secret=creds["api_secret"],
+            api_passphrase=creds["api_passphrase"],
+        ))
     else:
         c = ClobClient(
             host=settings.polymarket_base_url, key=priv,
             chain_id=settings.polygon_chain_id, signature_type=0,
         )
-    c.set_api_creds(c.create_or_derive_api_creds())
+        c.set_api_creds(c.create_or_derive_api_creds())
     return c
 
 
@@ -230,7 +321,7 @@ def main() -> int:
     resp = httpx.post(
         f"{settings.polymarket_base_url}/order",
         content=body_str,
-        headers={**_l2_headers(client, addr, "POST", "/order", body_str),
+        headers={**_l2_headers(client, proxy or addr, "POST", "/order", body_str),
                  "Content-Type": "application/json"},
         timeout=15,
     )
@@ -273,7 +364,7 @@ def main() -> int:
         "DELETE",
         f"{settings.polymarket_base_url}/order",
         content=cancel_body,
-        headers={**_l2_headers(client, addr, "DELETE", "/order", cancel_body),
+        headers={**_l2_headers(client, proxy or addr, "DELETE", "/order", cancel_body),
                  "Content-Type": "application/json"},
         timeout=15,
     )

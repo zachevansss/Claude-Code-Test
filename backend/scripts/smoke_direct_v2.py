@@ -213,9 +213,30 @@ def main() -> int:
         signatureType=POLY_PROXY,
     )
     signed = builder_ob.build_signed_order(data)
-    order_dict = signed.dict()
-    body = {"order": order_dict, "owner": user_creds.api_key,
-            "orderType": "GTC", "postOnly": False}
+    od = signed.dict()
+    # Reorder fields to match V4 clob-client's orderToJson exactly. Polymarket V2
+    # appears to use `deferExec`'s presence (or this exact shape) to flag V2.
+    order_dict = {
+        "salt": int(od["salt"]),
+        "maker": od["maker"],
+        "signer": od["signer"],
+        "taker": od["taker"],
+        "tokenId": od["tokenId"],
+        "makerAmount": od["makerAmount"],
+        "takerAmount": od["takerAmount"],
+        "side": od["side"],                  # "BUY" or "SELL"
+        "expiration": od["expiration"],
+        "nonce": od["nonce"],
+        "feeRateBps": od["feeRateBps"],
+        "signatureType": od["signatureType"],
+        "signature": od["signature"],
+    }
+    body = {
+        "deferExec": False,
+        "order": order_dict,
+        "owner": user_creds.api_key,
+        "orderType": "GTC",
+    }
     body_str = json.dumps(body, separators=(",", ":"))
     print(f"\nWire body: {body_str[:300]}...")
 

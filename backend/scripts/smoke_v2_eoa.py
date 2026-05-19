@@ -73,8 +73,9 @@ def pick_active_token() -> tuple[str, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pk-file", required=True,
-                        help="path (or glob) to a JSON file with a 'private_key' field")
+    parser.add_argument("--pk-file",
+                        default="/root/copytrade-eoa-backups/rotate_eoa_*.json",
+                        help="path or glob to a JSON file with a 'private_key' field")
     parser.add_argument("--price", type=float, default=0.01)
     parser.add_argument("--size", type=float, default=5.0)
     parser.add_argument("--confirm", action="store_true")

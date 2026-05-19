@@ -78,6 +78,8 @@ def main() -> int:
     parser.add_argument("--price", type=float, default=0.01)
     parser.add_argument("--size", type=float, default=5.0)
     parser.add_argument("--confirm", action="store_true")
+    parser.add_argument("--sig-type", choices=["1271", "safe", "proxy"], default="1271",
+                        help="1271 = POLY_1271 (3); safe = POLY_GNOSIS_SAFE (2); proxy = POLY_PROXY (1)")
     args = parser.parse_args()
 
     db = SessionLocal()
@@ -111,14 +113,20 @@ def main() -> int:
     )
     print(f"  api_key: {creds.api_key}")
 
-    # Step 2: build full client with POLY_1271 + funder=proxy
-    print(f"\nInitializing trading client (POLY_1271 + funder=proxy) ...")
+    # Step 2: build full client with chosen sig type + funder=proxy
+    sig_map = {
+        "1271": SignatureTypeV2.POLY_1271,
+        "safe": SignatureTypeV2.POLY_GNOSIS_SAFE,
+        "proxy": SignatureTypeV2.POLY_PROXY,
+    }
+    chosen = sig_map[args.sig_type]
+    print(f"\nInitializing trading client ({args.sig_type} -> {chosen.name} + funder=proxy) ...")
     client = ClobClient(
         host=settings.polymarket_base_url,
         chain_id=settings.polygon_chain_id,
         key=priv,
         creds=creds,
-        signature_type=SignatureTypeV2.POLY_1271,
+        signature_type=chosen,
         funder=proxy,
     )
 

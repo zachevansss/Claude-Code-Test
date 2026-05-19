@@ -24,17 +24,17 @@ from src.models import ManagedWallet
 
 
 FACTORY = "0xab45c5a4b0c941a2f231c04c3f49182e1a254052"   # Polymarket: Proxy Wallet Factory
-IMPL = "0x44e999d5c2f66ef0861317f9a4805ac2e90aeb4f"      # ProxyWallet implementation
+# Hardcoded by Polymarket — proxy is a custom contract, NOT a standard EIP-1167 minimal proxy,
+# so we can't recompute the init-code hash from the implementation address. Constant comes from
+# Polymarket/magic-proxy-builder-example/constants/proxyWallet.ts.
+PROXY_INIT_CODE_HASH = "0xd21df8dc65880a8606f09fe0ce3df9b8869287ab0b058be05aa9e8af6330a00b"
 
 
 def derive_proxy(eoa: str) -> str:
-    init_code = bytes.fromhex(
-        "3d602d80600a3d3981f3"
-        "363d3d373d3d3d363d73" + IMPL[2:].lower() + "5af43d82803e903d91602b57fd5bf3"
-    )
     salt = keccak(bytes.fromhex(eoa[2:].lower()))
     addr = keccak(
-        b"\xff" + bytes.fromhex(FACTORY[2:].lower()) + salt + keccak(init_code)
+        b"\xff" + bytes.fromhex(FACTORY[2:].lower())
+        + salt + bytes.fromhex(PROXY_INIT_CODE_HASH[2:])
     )[12:]
     return to_checksum_address("0x" + addr.hex())
 

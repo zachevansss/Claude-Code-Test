@@ -49,9 +49,13 @@ from src.models import ManagedWallet
 from src.wallet.manager import WalletManager
 
 
-# V2 exchange addresses (the values py-clob-client should be using but isn't).
-V2_CTF = "0xE111180000d2663C0091e4f400237545B87B996B"
-V2_NEG = "0xe2222d279d744050d28e00520010520000310F59"
+# Polymarket V2 actual production exchange addresses.
+# Source: github.com/Polymarket/clob-client (V4) src/config.ts MATIC_CONTRACTS.
+# These ARE what we used to call "V1" — turns out the address didn't change;
+# only the order format did (still 12-field, but with deferExec wire wrapping).
+# The 0xE111... addresses from clob-client-v2 are a DIFFERENT (unused?) system.
+V2_CTF = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+V2_NEG = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
 
 ROUND_CONFIG = {
     "0.1":    (1, 2, 3),  # (price_decimals, size_decimals, amount_decimals)
